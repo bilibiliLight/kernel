@@ -484,7 +484,19 @@ nuc970serial_set_termios(struct uart_port *port, struct ktermios *termios,
 				  port->uartclk / 16 / 0xffff,
 				  port->uartclk / 16);
 
+	//------------lzy debug
+	if(baud == 230400)
+	{
+		baud = 250000;
+	}
+	//---------------------
+
 	quot = nuc970serial_get_divisor(port, baud);
+
+	//------------lzy debug
+	printk("uart set baud is %d\n", baud);
+	printk("uart set quot is %d\n", quot);
+	//---------------------
 
 	/*
 	 * Ok, we're now changing the port state.  Do it with

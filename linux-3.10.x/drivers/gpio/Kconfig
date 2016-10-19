@@ -115,6 +115,12 @@ config GPIO_NUC970
 	help
 	  Say yes here to support GPIO functionality of NUC970 chip
 
+config GPIO_SCALE
+        tristate "SCALE GPIO support"
+        depends on GPIOLIB
+        help
+          Say yes here to support GPIO functionality of NUC970 chip
+
 config GPIO_CLPS711X
 	def_bool y
 	depends on ARCH_CLPS711X
