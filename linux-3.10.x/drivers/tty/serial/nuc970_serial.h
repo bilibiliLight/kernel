@@ -41,6 +41,7 @@
 
 #define UART_REG_FSR	0x18
 #define RX_OVER_IF		0x00000001
+#define RS485_ADD_DETF  0x00000008
 #define PEF			0x00000010
 #define FEF			0x00000020
 #define BIF			0x00000040

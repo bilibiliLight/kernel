@@ -71,6 +71,11 @@ struct uart_nuc970_port {
 				      unsigned int state, unsigned int old);
 };
 
+struct uart_dmx512_data {
+#define DMX512_DATA_LEN 512
+    unsigned char buf[DMX512_DATA_LEN];
+};
+
 static struct uart_nuc970_port nuc970serial_ports[UART_NR];
 
 static inline struct uart_nuc970_port *
@@ -282,6 +287,46 @@ static void transmit_chars(struct uart_nuc970_port *up)
 		__stop_tx(up);
 }
 
+static void transmit485_chars(struct uart_nuc970_port *up)
+{
+	struct circ_buf *xmit = &up->port.state->xmit;
+	int count = 12;
+
+	if (up->port.x_char) {
+		while(serial_in(up, UART_REG_FSR) & TX_FULL);
+        //nine bit is set to 1
+        serial_out(up, UART_REG_LCR, serial_in(up, UART_REG_LCR) & (~0x38));
+		serial_out(up, UART_REG_THR, up->port.x_char);
+		up->port.icount.tx++;
+		up->port.x_char = 0;
+		return;
+	}
+	if (uart_tx_stopped(&up->port)) {
+		nuc970serial_stop_tx(&up->port);
+		return;
+	}
+
+	if (uart_circ_empty(xmit)) {
+		__stop_tx(up);
+		return;
+	}
+
+	do {
+		//while(serial_in(up, UART_REG_FSR) & TX_FULL);
+		serial_out(up, UART_REG_THR, xmit->buf[xmit->tail]);
+		xmit->tail = (xmit->tail + 1) & (UART_XMIT_SIZE - 1);
+		up->port.icount.tx++;
+		if (uart_circ_empty(xmit))
+			break;
+	} while (--count > 0);
+
+	if (uart_circ_chars_pending(xmit) < WAKEUP_CHARS)
+		uart_write_wakeup(&up->port);
+
+	if (uart_circ_empty(xmit))
+		__stop_tx(up);
+}
+
 static unsigned int check_modem_status(struct uart_nuc970_port *up)
 {
 	unsigned int status = 0;
@@ -298,16 +343,55 @@ static irqreturn_t nuc970serial_interrupt(int irq, void *dev_id)
 {
 	struct uart_nuc970_port *up = (struct uart_nuc970_port *)dev_id;
 	unsigned int isr;
+    unsigned int fsr;
 
-	isr = serial_in(up, UART_REG_ISR);
+    if(up->rs485.flags & SER_RS485_ENABLED)
+    {
+        isr = serial_in(up, UART_REG_ISR);
 
-	if (isr & (RDA_IF | TOUT_IF))
-		receive_chars(up);
-	
-	check_modem_status(up);
-	
-	if (isr & THRE_IF)
-		transmit_chars(up);
+    	if (isr & RDA_IF)
+        {
+            fsr = serial_in(up, UART_REG_FSR);
+            if(fsr & RS485_ADD_DETF)
+            {
+                //is addr
+                serial_out(up, UART_REG_FSR, RS485_ADD_DETF);
+
+                //write to dmx512_buf
+                //receive485_chars(up);
+
+                printk("485 addr is 1\n");
+            }
+            else
+            {
+                printk("485 addr is 0\n");
+            }
+        }
+    		
+        if (isr & TOUT_IF)
+        {
+            //receive_chars(up);
+        }
+    	
+    	check_modem_status(up);
+    	
+    	if (isr & THRE_IF)
+        {   
+    		transmit485_chars(up);            
+        }
+    }
+    else
+    {
+        isr = serial_in(up, UART_REG_ISR);
+
+    	if (isr & (RDA_IF | TOUT_IF))
+    		receive_chars(up);
+    	
+    	check_modem_status(up);
+    	
+    	if (isr & THRE_IF)
+    		transmit_chars(up);
+    }
 
 	return IRQ_HANDLED;
 }
@@ -484,19 +568,21 @@ nuc970serial_set_termios(struct uart_port *port, struct ktermios *termios,
 				  port->uartclk / 16 / 0xffff,
 				  port->uartclk / 16);
 
-	//------------lzy debug
+    /*
+	 * baud 230400 force to 250000,edit by lzy 2016.10.24
+	 */
 	if(baud == 230400)
 	{
 		baud = 250000;
+        quot = nuc970serial_get_divisor(port, baud);
+        quot = 47;
+        printk("uart set baud is %d\n", baud);
+	    printk("uart set quot is %d\n", quot);
 	}
-	//---------------------
-
-	quot = nuc970serial_get_divisor(port, baud);
-
-	//------------lzy debug
-	printk("uart set baud is %d\n", baud);
-	printk("uart set quot is %d\n", quot);
-	//---------------------
+    else
+    {
+        quot = nuc970serial_get_divisor(port, baud);
+    }
 
 	/*
 	 * Ok, we're now changing the port state.  Do it with
@@ -659,6 +745,20 @@ void nuc970serial_config_rs485(struct uart_port *port, struct serial_rs485 *rs48
 		
 		// set auto direction mode
 		serial_out(p,UART_REG_ALT_CSR,(serial_in(p, UART_REG_ALT_CSR) | (1 << 10)) );
+
+        //------------lzy debug
+        //set trigger level 1 byte
+        serial_out(p, UART_REG_FCR, serial_in(p, UART_REG_FCR) & (~0xF0));
+
+        //set tor is max, buad 250000 is 1020us
+        serial_out(p, UART_REG_TOR, 0xFF);
+
+        //two stop bit
+        serial_out(p, UART_REG_LCR, serial_in(p, UART_REG_LCR) | (1<<2));
+
+        //set NMM, ADDEN
+        //serial_out(p, UART_REG_ALT_CSR, serial_in(p, UART_REG_ALT_CSR) | (1<<8) | (1<<15));        
+        //---------------------
 	}
 
 	spin_unlock(&port->lock);
@@ -668,6 +768,7 @@ static int
 nuc970serial_rs485_ioctl(struct uart_port *port, unsigned int cmd, unsigned long arg)
 {
 	struct serial_rs485 rs485conf;
+    struct uart_dmx512_data dmx512_data;
 
 	switch (cmd) {
 	case TIOCSRS485:
@@ -684,6 +785,29 @@ nuc970serial_rs485_ioctl(struct uart_port *port, unsigned int cmd, unsigned long
 					sizeof(rs485conf)))
 			return -EFAULT;
 		break;
+    case TIOCDMX512SET:
+        //copy dmx512 data
+        if (copy_from_user(&dmx512_data, (struct uart_dmx512_data *) arg,
+					sizeof(uart_dmx512_data)))
+	        return -EFAULT;
+        //release uart,init for gpio
+        pin_number = gpio_get_pin_number(arg);
+        if (!pin_number)
+        {
+            __E(KERN_ALERT, "get pin number error\n");
+            return -EFAULT;
+        }
+        gpio_request(pin_number, "gpioout");
+        gpio_direction_output(pin_number, 1);
+        gpio_set_value(pin_number, 1);
+        //generate mark time between packets
+        //generate break info
+        //generate mark after break info
+        //release gpio,restore for uart
+        //uart send
+        break;
+    case TIOCDMX512GET:
+        break;
 
 	default:
 		return -ENOIOCTLCMD;
