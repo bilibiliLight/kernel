@@ -43,12 +43,17 @@
 #include <mach/map.h>
 #include <mach/regs-serial.h>
 #include <mach/regs-gcr.h>
+#include <mach/regs-gpio.h>
 #include <mach/mfp.h>
 
 
 #include "nuc970_serial.h"
 
 #define UART_NR 11
+
+#define TIOCDMX512SET	0x5461
+#define TIOCDMX512GET	0x5462
+
 static struct uart_driver nuc970serial_reg;
 
 struct clk		*clk;
@@ -71,10 +76,20 @@ struct uart_nuc970_port {
 				      unsigned int state, unsigned int old);
 };
 
-struct uart_dmx512_data {
+struct dmx512_data {
 #define DMX512_DATA_LEN 512
     unsigned char buf[DMX512_DATA_LEN];
 };
+
+struct uart_dmx512_data {
+    struct dmx512_data data;
+    struct mutex dmx512_lock;
+    unsigned char *p_start;
+    unsigned char *p_end;
+    unsigned int flag;
+};
+
+static struct uart_dmx512_data uartdmx512_data;
 
 static struct uart_nuc970_port nuc970serial_ports[UART_NR];
 
@@ -289,42 +304,21 @@ static void transmit_chars(struct uart_nuc970_port *up)
 
 static void transmit485_chars(struct uart_nuc970_port *up)
 {
-	struct circ_buf *xmit = &up->port.state->xmit;
-	int count = 12;
+    int count = 16;
 
-	if (up->port.x_char) {
-		while(serial_in(up, UART_REG_FSR) & TX_FULL);
-        //nine bit is set to 1
-        serial_out(up, UART_REG_LCR, serial_in(up, UART_REG_LCR) & (~0x38));
-		serial_out(up, UART_REG_THR, up->port.x_char);
-		up->port.icount.tx++;
-		up->port.x_char = 0;
-		return;
-	}
-	if (uart_tx_stopped(&up->port)) {
-		nuc970serial_stop_tx(&up->port);
-		return;
-	}
+    while(count--)
+    {
+        if(uartdmx512_data.p_start == uartdmx512_data.p_end)
+        {
+            __stop_tx(up);
+            uartdmx512_data.flag = 1;
+            return;
+        }
 
-	if (uart_circ_empty(xmit)) {
-		__stop_tx(up);
-		return;
-	}
-
-	do {
-		//while(serial_in(up, UART_REG_FSR) & TX_FULL);
-		serial_out(up, UART_REG_THR, xmit->buf[xmit->tail]);
-		xmit->tail = (xmit->tail + 1) & (UART_XMIT_SIZE - 1);
-		up->port.icount.tx++;
-		if (uart_circ_empty(xmit))
-			break;
-	} while (--count > 0);
-
-	if (uart_circ_chars_pending(xmit) < WAKEUP_CHARS)
-		uart_write_wakeup(&up->port);
-
-	if (uart_circ_empty(xmit))
-		__stop_tx(up);
+        if(serial_in(up, UART_REG_FSR) & TX_FULL)
+            break;
+        serial_out(up, UART_REG_THR, *uartdmx512_data.p_start++);
+    }
 }
 
 static unsigned int check_modem_status(struct uart_nuc970_port *up)
@@ -768,7 +762,10 @@ static int
 nuc970serial_rs485_ioctl(struct uart_port *port, unsigned int cmd, unsigned long arg)
 {
 	struct serial_rs485 rs485conf;
-    struct uart_dmx512_data dmx512_data;
+    volatile unsigned int *reg;
+    unsigned int regRec;
+    int timeout = 1000;
+    unsigned int flag;
 
 	switch (cmd) {
 	case TIOCSRS485:
@@ -786,25 +783,69 @@ nuc970serial_rs485_ioctl(struct uart_port *port, unsigned int cmd, unsigned long
 			return -EFAULT;
 		break;
     case TIOCDMX512SET:
+        //mutex lock
+        mutex_lock(&uartdmx512_data.dmx512_lock);
+        
+        //stop uart tx
+        nuc970serial_stop_tx(port);
+        
         //copy dmx512 data
-        if (copy_from_user(&dmx512_data, (struct uart_dmx512_data *) arg,
-					sizeof(uart_dmx512_data)))
+        if (copy_from_user(&uartdmx512_data.data, (struct dmx512_data *) arg,
+					sizeof(uartdmx512_data.data)))
 	        return -EFAULT;
-        //release uart,init for gpio
-        pin_number = gpio_get_pin_number(arg);
-        if (!pin_number)
-        {
-            __E(KERN_ALERT, "get pin number error\n");
-            return -EFAULT;
-        }
-        gpio_request(pin_number, "gpioout");
-        gpio_direction_output(pin_number, 1);
-        gpio_set_value(pin_number, 1);
+
+        printk("ioctl calling...\n");
+        printk("dmx512_data is %s\n", uartdmx512_data.data.buf);
+        //init pointer
+        spin_lock(&port->lock);
+        uartdmx512_data.p_start = uartdmx512_data.data.buf;
+        uartdmx512_data.p_end = uartdmx512_data.p_start + DMX512_DATA_LEN;
+        uartdmx512_data.flag = 0;
+        spin_unlock(&port->lock);
+        
+        //release uart,init for gpio,gpio mode,out,high
+        reg = (volatile unsigned int *)REG_MFP_GPI_L;
+        regRec = __raw_readl(reg);
+        __raw_writel(regRec & (~0xF0), reg);
+        reg = (volatile unsigned int *)REG_GPIOI_DIR;
+        __raw_writel(__raw_readl(reg) | (1<<1), reg);
+        reg = (volatile unsigned int *)REG_GPIOI_DATAOUT;
+        __raw_writel(__raw_readl(reg) | (1<<1), reg);
+        
         //generate mark time between packets
+        msleep(1);
+        
         //generate break info
+        reg = (volatile unsigned int *)REG_GPIOI_DATAOUT;
+        __raw_writel(__raw_readl(reg) & (~(1<<1)), reg);
+        udelay(180);
+        __raw_writel(__raw_readl(reg) | (1<<1), reg);
+        
         //generate mark after break info
+        udelay(30);
+        
         //release gpio,restore for uart
+        reg = (volatile unsigned int *)REG_MFP_GPI_L;
+        __raw_writel(regRec, reg);
+        
         //uart send
+        nuc970serial_start_tx(port);
+
+        while(timeout--)
+        {
+            msleep(1);
+            spin_lock(&port->lock);
+            flag = uartdmx512_data.flag;
+            spin_unlock(&port->lock);
+            if(flag == 1)
+            {
+                printk("timeout is %d\n", timeout);
+                break;
+            }
+        }
+
+        //mutex unlock
+        mutex_unlock(&uartdmx512_data.dmx512_lock);
         break;
     case TIOCDMX512GET:
         break;
@@ -1309,8 +1350,13 @@ static int nuc970serial_probe(struct platform_device *pdev)
 
 	//}
 
-
-
+    //init uart dmx512 data
+    spin_lock(&up->port.lock);
+    uartdmx512_data.p_start = 0;
+    uartdmx512_data.p_end = 0;
+    uartdmx512_data.flag = 0;
+    spin_unlock(&up->port.lock);
+    mutex_init(&uartdmx512_data.dmx512_lock);
 	
 	return 0;
 }
