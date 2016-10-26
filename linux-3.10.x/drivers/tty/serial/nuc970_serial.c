@@ -364,19 +364,55 @@ static unsigned int check_modem_status(struct uart_nuc970_port *up)
 	return status;
 }
 
+unsigned char testbuf[512];
+int num = 0;
+
 static irqreturn_t nuc970serial_interrupt(int irq, void *dev_id)
 {
 	struct uart_nuc970_port *up = (struct uart_nuc970_port *)dev_id;
 	unsigned int isr;
     unsigned int fsr;
+    unsigned char ch;
+    int i;
 
     if(up->rs485.flags & SER_RS485_ENABLED)
     {
         isr = serial_in(up, UART_REG_ISR);
+        fsr = serial_in(up, UART_REG_FSR);
 
+        if(isr & 0x04)
+        {
+            printk("addr is 1\n");
+        }
+/*
+        if (isr & TOUT_IF)
+        {
+            printk("MTBP detected!\n");
+            //record cur_idx
+            if(dmx512_receive.cur_idx == 0)
+            {
+                dmx512_receive.cur_idx = 1;
+                dmx512_receive.cache_idx = 0;
+            }
+            else
+            {
+                dmx512_receive.cur_idx = 0;
+                dmx512_receive.cache_idx = 1;
+            }
+
+            //reset wr_pos
+            dmx512_receive.wr_pos = 0;
+
+            //upload dmx512 data
+            dmx512_receive_event = 1;
+            wake_up_interruptible(&dmx512_receive_waitq); 
+        }
+*/
     	if (isr & RDA_IF)
         {
             fsr = serial_in(up, UART_REG_FSR);
+            ch = serial_in(up, UART_REG_RBR);
+
             if(fsr & RS485_ADD_DETF)
             {
                 //is addr
@@ -389,7 +425,7 @@ static irqreturn_t nuc970serial_interrupt(int irq, void *dev_id)
             }
             else
             {
-                serial_in(up, UART_REG_RBR);
+                ch = serial_in(up, UART_REG_RBR);
 
                 //record cur_idx
                 if(dmx512_receive.cur_idx == 0)
@@ -410,34 +446,10 @@ static irqreturn_t nuc970serial_interrupt(int irq, void *dev_id)
                 dmx512_receive_event = 1;
                 wake_up_interruptible(&dmx512_receive_waitq); 
                 
-                //printk("485 addr is 0\n");
+                printk("485 addr is 0\n");
             }
         }
-    		
-        if (isr & TOUT_IF)
-        {
-            //record cur_idx
-            if(dmx512_receive.cur_idx == 0)
-            {
-                dmx512_receive.cur_idx = 1;
-                dmx512_receive.cache_idx = 0;
-            }
-            else
-            {
-                dmx512_receive.cur_idx = 0;
-                dmx512_receive.cache_idx = 1;
-            }
 
-            //reset wr_pos
-            dmx512_receive.wr_pos = 0;
-
-            //upload dmx512 data
-            dmx512_receive_event = 1;
-            wake_up_interruptible(&dmx512_receive_waitq); 
-
-            //printk("MTBP detected!\n");
-        }
-    	
     	check_modem_status(up);
     	
     	if (isr & THRE_IF)
@@ -811,7 +823,6 @@ void nuc970serial_config_rs485(struct uart_port *port, struct serial_rs485 *rs48
 		// set auto direction mode
 		serial_out(p,UART_REG_ALT_CSR,(serial_in(p, UART_REG_ALT_CSR) | (1 << 10)) );
 
-        //------------lzy debug
         //set trigger level 1 byte
         serial_out(p, UART_REG_FCR, serial_in(p, UART_REG_FCR) & (~0xF0));
 
@@ -823,7 +834,8 @@ void nuc970serial_config_rs485(struct uart_port *port, struct serial_rs485 *rs48
 
         //set NMM, ADDEN
         serial_out(p, UART_REG_ALT_CSR, serial_in(p, UART_REG_ALT_CSR) | (1<<8) | (1<<15));        
-        //---------------------
+
+        printk("UART_REG_IER is 0x%08x\n", serial_in(p, UART_REG_IER));
 	}
 
 	spin_unlock(&port->lock);
