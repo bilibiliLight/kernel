@@ -143,6 +143,7 @@ ssize_t redirected_tty_write(struct file *, const char __user *,
 							size_t, loff_t *);
 static unsigned int tty_poll(struct file *, poll_table *);
 static int tty_open(struct inode *, struct file *);
+int tty_mmap(struct file * file,struct vm_area_struct * vma);
 long tty_ioctl(struct file *file, unsigned int cmd, unsigned long arg);
 #ifdef CONFIG_COMPAT
 static long tty_compat_ioctl(struct file *file, unsigned int cmd,
@@ -475,6 +476,7 @@ static const struct file_operations tty_fops = {
 	.write		= tty_write,
 	.poll		= tty_poll,
 	.unlocked_ioctl	= tty_ioctl,
+	.mmap       = tty_mmap,
 	.compat_ioctl	= tty_compat_ioctl,
 	.open		= tty_open,
 	.release	= tty_release,
@@ -2707,6 +2709,20 @@ struct tty_struct *tty_pair_get_pty(struct tty_struct *tty)
 	return tty->link;
 }
 EXPORT_SYMBOL(tty_pair_get_pty);
+
+/*
+ * Mmap to user space
+ * add by lzy, 2016.10.31
+ */
+int tty_mmap(struct file *file, struct vm_area_struct *vma)
+{
+    struct tty_struct *tty = file_tty(file);
+    int ret = 0;  
+    
+    ret = (tty->ops->mmap)(tty, vma);
+
+	return ret;
+}
 
 /*
  * Split this up, as gcc can choke on it otherwise..

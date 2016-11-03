@@ -48,12 +48,14 @@
 #define RX_EMPTY		0x00004000
 #define TX_EMPTY		0x00400000
 #define TX_FULL			0x00800000
+#define TX_OVER_IF      0x01000000
 #define RX_FULL			0x00008000
 #define TE_FLAG			0x10000000
 
 #define UART_REG_ISR	0x1C
 #define RDA_IF			0x00000001
 #define THRE_IF			0x00000002
+#define RLS_IF          0x00000004
 #define TOUT_IF			0x00000010
 
 #define UART_REG_TOR	0x20

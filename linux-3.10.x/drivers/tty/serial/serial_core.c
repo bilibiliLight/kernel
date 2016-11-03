@@ -1140,6 +1140,22 @@ static int uart_get_icount(struct tty_struct *tty,
 }
 
 /*
+ * Mmap data to userspace
+ * lzy add 2016.10.31
+ */
+static int
+uart_mmap(struct tty_struct *tty, struct vm_area_struct * vma)
+{
+    struct uart_state *state = tty->driver_data;
+    struct uart_port *uport = state->uart_port;
+    int ret;
+    
+    ret = (uport->ops->mmap)(uport, vma);
+
+	return ret;
+}
+
+/*
  * Called via sys_ioctl.  We can use spin_lock_irq() here.
  */
 static int
@@ -2251,6 +2267,7 @@ static const struct tty_operations uart_ops = {
 	.chars_in_buffer= uart_chars_in_buffer,
 	.flush_buffer	= uart_flush_buffer,
 	.ioctl		= uart_ioctl,
+	.mmap       = uart_mmap,
 	.throttle	= uart_throttle,
 	.unthrottle	= uart_unthrottle,
 	.send_xchar	= uart_send_xchar,
