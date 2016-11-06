@@ -101,6 +101,19 @@ struct serial_icounter_struct {
 	int reserved[9];
 };
 
+struct dmx512_config_tx {
+    unsigned int mtbp_time;
+    unsigned int mab_time;
+    unsigned int break_time;
+    unsigned int between_time;
+};
+
+struct dmx512_config_rx {
+    unsigned int record_frames;
+    unsigned int sample_rate;
+    unsigned int frame_timeout;
+};
+
 /*
  * Serial interface for controlling RS485 settings on chips with suitable
  * support. Set with TIOCSRS485 and get with TIOCGRS485 if supported by your
@@ -121,6 +134,10 @@ struct serial_rs485 {
 	__u32	delay_rts_after_send;	/* Delay after send (milliseconds) */
 	__u32	padding[5];		/* Memory is cheap, new structs
 					   are a royal PITA .. */
+#define SER_RS485_DMX512_TX		    (1 << 8)
+#define SER_RS485_DMX512_RX		    (1 << 16)
+    struct dmx512_config_tx tx_config;
+    struct dmx512_config_rx rx_config;
 };
 
 #endif /* _UAPI_LINUX_SERIAL_H */
