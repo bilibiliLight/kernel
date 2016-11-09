@@ -83,6 +83,7 @@ struct dmx512_rx {
     struct spinlock spin_lock;
     int wr_pos;
     int cur_idx;
+    int skip_cnt;
     int total_num;
 };
 
@@ -344,12 +345,20 @@ static void receive485_handle_done(struct uart_nuc970_port *up, unsigned int fla
     //add flags
     up->dmx512rx_status.flags = flags;
 
-    if(up->dmx512rx.p_data != (struct dmx512_data *)up->pmmapbuf)
+    if(up->dmx512rx.cur_idx <= 255)
     {
-        up->pmmapbuf = (char *)up->dmx512rx.p_data;
         up->dmx512rx_status.flags |= DMX512_RX_STATUS_CACHE;
     }
 
+    if(!((flags & DMX512_RX_STATUS_BREAK) && ((up->dmx512rx.cur_idx + 1) % 256 == 0)))
+    {
+        if(up->dmx512rx.p_data != (struct dmx512_data *)up->pmmapbuf)
+        {
+            up->pmmapbuf = (char *)up->dmx512rx.p_data;
+            up->dmx512rx_status.flags |= DMX512_RX_STATUS_CACHE;
+        }
+    }
+    
     //disenable interupt
     serial_out(up, UART_REG_IER, serial_in(up, UART_REG_IER) & (~(RTO_IEN | RDA_IEN | TIME_OUT_EN)));
 
@@ -378,117 +387,206 @@ receive485_chars(struct uart_nuc970_port *up)
 
     if(isr & RDA_IF)
     {
-        while (max_count--)
+        if((up->rs485.rx_config.skip_frames > 0) && (up->dmx512rx.skip_cnt > 0))
         {
-            //read head
-            if(up->dmx512rx.wr_pos == 0)
+            while (max_count--)
             {
-                ch = (unsigned char)serial_in(up, UART_REG_RBR);
-                ch = (unsigned char)serial_in(up, UART_REG_RBR);
-                max_count -= 2;
+                //read head
+                if(up->dmx512rx.wr_pos == 0)
+                {
+                    ch = (unsigned char)serial_in(up, UART_REG_RBR);
+                    ch = (unsigned char)serial_in(up, UART_REG_RBR);
+                    max_count -= 2;
+                }
+                
+        		ch = (unsigned char)serial_in(up, UART_REG_RBR);
+        		
+                if(up->dmx512rx.wr_pos < DMX512_DATA_LEN)
+                {
+        		    up->dmx512rx.wr_pos++;
+                }
+                else
+                {
+                    //receive is error
+                    if(up->dmx512rx.cur_idx != 0)
+                    {
+                        flags = DMX512_RX_STATUS_BREAK | DMX512_RX_STATUS_TMSHORT;
+                        receive485_handle_done(up, flags);
+                        isr = 0;
+                        fsr = 0;
+                        break;
+                    }
+                }
+
+                fsr = serial_in(up, UART_REG_FSR);
             }
-            
-    		ch = (unsigned char)serial_in(up, UART_REG_RBR);
-    		
-            if(up->dmx512rx.wr_pos < DMX512_DATA_LEN)
+        }
+        else
+        {
+            while (max_count--)
             {
-    		    up->dmx512rx.p_data[up->dmx512rx.cur_idx % 256].buf[up->dmx512rx.wr_pos++] = ch;
+                //read head
+                if(up->dmx512rx.wr_pos == 0)
+                {
+                    ch = (unsigned char)serial_in(up, UART_REG_RBR);
+                    ch = (unsigned char)serial_in(up, UART_REG_RBR);
+                    max_count -= 2;
+                }
+                
+        		ch = (unsigned char)serial_in(up, UART_REG_RBR);
+        		
+                if(up->dmx512rx.wr_pos < DMX512_DATA_LEN)
+                {
+        		    up->dmx512rx.p_data[up->dmx512rx.cur_idx % 256].buf[up->dmx512rx.wr_pos++] = ch;
+                }
+                else
+                {
+                    //receive is error
+                    if(up->dmx512rx.cur_idx != 0)
+                    {
+                        //skip last frame
+                        if(up->dmx512rx.cur_idx > 0)
+                            up->dmx512rx.cur_idx--;
+                        
+                        flags = DMX512_RX_STATUS_BREAK | DMX512_RX_STATUS_TMSHORT;
+                        receive485_handle_done(up, flags);
+                        isr = 0;
+                        fsr = 0;
+                        break;
+                    }
+                }
+
+                fsr = serial_in(up, UART_REG_FSR);
+    	    }
+        }
+    }
+    
+    if(isr & TOUT_IF)
+    {
+        if((up->rs485.rx_config.skip_frames > 0) && (up->dmx512rx.skip_cnt > 0))
+        {
+            while (!(fsr & RX_EMPTY))
+            {
+        		ch = (unsigned char)serial_in(up, UART_REG_RBR);
+        		
+                if(up->dmx512rx.wr_pos < DMX512_DATA_LEN)
+                {
+        		    up->dmx512rx.wr_pos++;
+                }
+
+                fsr = serial_in(up, UART_REG_FSR);
+    	    }
+
+            //receive is error
+            if(up->dmx512rx.wr_pos != DMX512_DATA_LEN)
+            {
+                //reset wr_pos
+                up->dmx512rx.wr_pos = 0;
+                
+                if(up->dmx512rx.cur_idx != 0)
+                {   
+                    flags = DMX512_RX_STATUS_BREAK | DMX512_RX_STATUS_CHLOST;
+                    receive485_handle_done(up, flags);
+                    isr = 0;
+                    fsr = 0;
+                    return;
+                }
+                else
+                {
+                    return;
+                }
             }
-            else
+
+            //reset wr_pos
+            up->dmx512rx.wr_pos = 0;
+        }
+        else
+        {
+            while (!(fsr & RX_EMPTY))
             {
-                //receive is error
+        		ch = (unsigned char)serial_in(up, UART_REG_RBR);
+        		
+                if(up->dmx512rx.wr_pos < DMX512_DATA_LEN)
+                {
+        		    up->dmx512rx.p_data[up->dmx512rx.cur_idx % 256].buf[up->dmx512rx.wr_pos++] = ch;
+                }
+
+                fsr = serial_in(up, UART_REG_FSR);
+    	    }
+
+            //receive is error
+            if(up->dmx512rx.wr_pos != DMX512_DATA_LEN)
+            {
+                //reset wr_pos
+                up->dmx512rx.wr_pos = 0;
+                
                 if(up->dmx512rx.cur_idx != 0)
                 {
                     //skip last frame
                     if(up->dmx512rx.cur_idx > 0)
                         up->dmx512rx.cur_idx--;
-                    
-                    flags = DMX512_RX_STATUS_BREAK | DMX512_RX_STATUS_TMSHORT;
+                        
+                    flags = DMX512_RX_STATUS_BREAK | DMX512_RX_STATUS_CHLOST;
                     receive485_handle_done(up, flags);
                     isr = 0;
                     fsr = 0;
-                    break;
-                }
-            }
-
-            fsr = serial_in(up, UART_REG_FSR);
-	    }
-    }
-    
-    if(isr & TOUT_IF)
-    {
-        while (!(fsr & RX_EMPTY))
-        {
-    		ch = (unsigned char)serial_in(up, UART_REG_RBR);
-    		
-            if(up->dmx512rx.wr_pos < DMX512_DATA_LEN)
-            {
-    		    up->dmx512rx.p_data[up->dmx512rx.cur_idx % 256].buf[up->dmx512rx.wr_pos++] = ch;
-            }
-
-            fsr = serial_in(up, UART_REG_FSR);
-	    }
-
-        //receive is error
-        if(up->dmx512rx.wr_pos != DMX512_DATA_LEN)
-        {
-            //reset wr_pos
-            up->dmx512rx.wr_pos = 0;
-            
-            if(up->dmx512rx.cur_idx != 0)
-            {
-                //skip last frame
-                if(up->dmx512rx.cur_idx > 0)
-                    up->dmx512rx.cur_idx--;
-                    
-                flags = DMX512_RX_STATUS_BREAK | DMX512_RX_STATUS_CHLOST;
-                receive485_handle_done(up, flags);
-                isr = 0;
-                fsr = 0;
-                return;
-            }
-            else
-            {
-                return;
-            }
-        }
-
-        //reset wr_pos
-        up->dmx512rx.wr_pos = 0;
-
-        //increase cur index
-        if(up->dmx512rx.cur_idx < (up->dmx512rx.total_num - 1))
-        {
-            //change cache
-            if((up->dmx512rx.cur_idx % 256) == 255)
-            {
-                if(up->dmx512rx.p_data == (struct dmx512_data *)up->pallocrxbuf1)
-                {
-                    up->dmx512rx.p_data = (struct dmx512_data *)up->pallocrxbuf2;
-                    up->pmmapbuf = up->pallocrxbuf1;
+                    return;
                 }
                 else
                 {
-                    up->dmx512rx.p_data = (struct dmx512_data *)up->pallocrxbuf1;
-                    up->pmmapbuf = up->pallocrxbuf2;
+                    return;
+                }
+            }
+
+            //reset wr_pos
+            up->dmx512rx.wr_pos = 0;
+
+            //increase cur index
+            if(up->dmx512rx.cur_idx < (up->dmx512rx.total_num - 1))
+            {
+                //change cache
+                if((up->dmx512rx.cur_idx % 256) == 255)
+                {
+                    if(up->dmx512rx.p_data == (struct dmx512_data *)up->pallocrxbuf1)
+                    {
+                        up->dmx512rx.p_data = (struct dmx512_data *)up->pallocrxbuf2;
+                        up->pmmapbuf = up->pallocrxbuf1;
+                    }
+                    else
+                    {
+                        up->dmx512rx.p_data = (struct dmx512_data *)up->pallocrxbuf1;
+                        up->pmmapbuf = up->pallocrxbuf2;
+                    }
+
+                    //add flags
+                    up->dmx512rx_status.flags = DMX512_RX_STATUS_CACHE;
+
+                    //send wakeup event
+                    atomic_set(&dmx512_rx_event, 1);
+                    wake_up_interruptible(&dmx512_rx_waitq);
                 }
 
-                //add flags
-                up->dmx512rx_status.flags = DMX512_RX_STATUS_CACHE;
-
-                //send wakeup event
-                atomic_set(&dmx512_rx_event, 1);
-                wake_up_interruptible(&dmx512_rx_waitq);
+                up->dmx512rx.cur_idx++;
             }
-        
-            up->dmx512rx.cur_idx++;
-        }
-        else
-        {
-            //receive done
-            flags = DMX512_RX_STATUS_DONE;
+            else
+            {
+                //receive done
+                flags = DMX512_RX_STATUS_DONE;
 
-            receive485_handle_done(up, flags);
+                receive485_handle_done(up, flags);
+            }
+        } 
+
+        if(up->rs485.rx_config.skip_frames > 0)
+        {
+            if(up->dmx512rx.skip_cnt >= up->rs485.rx_config.skip_frames)
+            {
+                up->dmx512rx.skip_cnt = 0;
+            }
+            else
+            {
+                up->dmx512rx.skip_cnt++;
+            }
         }
     }
 }
@@ -1012,6 +1110,7 @@ void nuc970serial_config_rs485_dmx512tx(struct uart_port *port, struct serial_rs
 void nuc970serial_config_rs485_dmx512rx(struct uart_port *port, struct serial_rs485 *rs485conf)
 {
 	struct uart_nuc970_port *p = to_nuc970_uart_port(port);
+    unsigned int timeout = 0;
 
 	spin_lock(&port->lock);
 
@@ -1051,7 +1150,23 @@ void nuc970serial_config_rs485_dmx512rx(struct uart_port *port, struct serial_rs
     serial_out(p, UART_REG_FCR, serial_in(p, UART_REG_FCR) | (1 << 8));
 
     //set tor is max, buad 250000 is 1020us
-    serial_out(p, UART_REG_TOR, 128);//1
+    timeout = p->rs485.rx_config.frame_timeout / 4;
+    if((timeout >= 20) && (timeout <= 255))
+    {
+        serial_out(p, UART_REG_TOR, timeout);
+    }
+    else if(timeout == 0)
+    {
+        serial_out(p, UART_REG_TOR, 128);
+    }
+    else if(timeout < 20)
+    {
+        serial_out(p, UART_REG_TOR, 20);
+    }
+    else if(timeout > 255)
+    {
+        serial_out(p, UART_REG_TOR, 255);
+    }
     
     //two stop bit
     //serial_out(p, UART_REG_LCR, serial_in(p, UART_REG_LCR) | (1<<2));
@@ -1203,6 +1318,7 @@ nuc970serial_rs485_ioctl(struct uart_port *port, unsigned int cmd, unsigned long
 
             p->dmx512rx.cur_idx = 0;
             p->dmx512rx.wr_pos = 0;
+            p->dmx512rx.skip_cnt = 0;
             p->dmx512rx.total_num = p->rs485.rx_config.record_frames;
             p->dmx512rx.p_data = (struct dmx512_data *)p->pallocrxbuf1;
             p->pmmapbuf = p->pallocrxbuf1;
