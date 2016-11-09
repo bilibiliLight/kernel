@@ -117,6 +117,10 @@ struct uart_nuc970_port {
     char                *pallocrxbuf1;      /* alloc for dmx512 receive */
     char                *pallocrxbuf2;      /* alloc for dmx512 receive */
     unsigned long       malloc_size;    /* mmap to user buf size */
+    atomic_t            tx_condition;   /* tx wait queue condition */
+    wait_queue_head_t   tx_queue;       /* tx wait queue */
+    atomic_t            rx_condition;   /* rx wait queue condition */
+    wait_queue_head_t   rx_queue;       /* rx wait queue */
 	/*
 	 * We provide a per-port pm hook.
 	 */
@@ -124,12 +128,15 @@ struct uart_nuc970_port {
 				      unsigned int state, unsigned int old);
 };
 
-static struct uart_nuc970_port nuc970serial_ports[UART_NR];
+//uart0-10:PE0,PE2,PE11,PE12,PH8,PB0,PB2,PI1,PI12,PD11,PB12
+volatile unsigned int * tx_reg_func[11] = {    REG_MFP_GPE_L,     REG_MFP_GPE_L,    REG_MFP_GPE_H,      REG_MFP_GPE_H,     REG_MFP_GPH_H,     REG_MFP_GPB_L,     REG_MFP_GPB_L,     REG_MFP_GPI_L,     REG_MFP_GPI_H,     REG_MFP_GPD_H,     REG_MFP_GPB_H};
+unsigned int            tx_pos_func[11] = {      0x0F<<(4*0),       0x0F<<(4*2), 0x0F<<(4*(11-8)),  0x0F<<(4*(12-8)),   0x0F<<(4*(8-8)),       0x0F<<(4*0),       0x0F<<(4*2),       0x0F<<(4*1),  0x0F<<(4*(12-8)),  0x0F<<(4*(11-8)),  0x0F<<(4*(12-8))};
+volatile unsigned int *  tx_reg_dir[11] = {    REG_GPIOE_DIR,     REG_GPIOE_DIR,    REG_GPIOE_DIR,      REG_GPIOE_DIR,     REG_GPIOH_DIR,     REG_GPIOB_DIR,     REG_GPIOB_DIR,     REG_GPIOI_DIR,     REG_GPIOI_DIR,     REG_GPIOD_DIR,     REG_GPIOB_DIR};
+unsigned int             tx_pos_dir[11] = {      0x01<<(1*0),       0x01<<(1*2),     0x01<<(1*11),       0x01<<(1*12),       0x01<<(1*8),       0x01<<(1*0),       0x01<<(1*2),       0x01<<(1*1),      0x01<<(1*12),      0x01<<(1*11),      0x01<<(1*12)};
+volatile unsigned int *  tx_reg_out[11] = {REG_GPIOE_DATAOUT, REG_GPIOE_DATAOUT, REG_GPIOE_DATAOUT, REG_GPIOE_DATAOUT, REG_GPIOH_DATAOUT, REG_GPIOB_DATAOUT, REG_GPIOB_DATAOUT, REG_GPIOI_DATAOUT, REG_GPIOI_DATAOUT, REG_GPIOD_DATAOUT, REG_GPIOB_DATAOUT};
+unsigned int             tx_pos_out[11] = {      0x01<<(1*0),       0x01<<(1*2),     0x01<<(1*11),       0x01<<(1*12),       0x01<<(1*8),       0x01<<(1*0),       0x01<<(1*2),       0x01<<(1*1),      0x01<<(1*12),      0x01<<(1*11),      0x01<<(1*12)};
 
-static DECLARE_WAIT_QUEUE_HEAD(dmx512_tx_waitq);
-static DECLARE_WAIT_QUEUE_HEAD(dmx512_rx_waitq);
-static atomic_t dmx512_tx_event = ATOMIC_INIT(0);
-static atomic_t dmx512_rx_event = ATOMIC_INIT(0);
+static struct uart_nuc970_port nuc970serial_ports[UART_NR];
 
 static inline struct uart_nuc970_port *
 to_nuc970_uart_port(struct uart_port *uart)
@@ -369,8 +376,8 @@ static void receive485_handle_done(struct uart_nuc970_port *up, unsigned int fla
     serial_out(up, UART_REG_ISR, 0xFFFFFFFF);
 
     //send wakeup event
-    atomic_set(&dmx512_rx_event, 1);
-    wake_up_interruptible(&dmx512_rx_waitq);
+    atomic_set(&up->rx_condition, 1);
+    wake_up_interruptible(&up->rx_queue);
 }
 
 static void
@@ -562,8 +569,8 @@ receive485_chars(struct uart_nuc970_port *up)
                     up->dmx512rx_status.flags = DMX512_RX_STATUS_CACHE;
 
                     //send wakeup event
-                    atomic_set(&dmx512_rx_event, 1);
-                    wake_up_interruptible(&dmx512_rx_waitq);
+                    atomic_set(&up->rx_condition, 1);
+                    wake_up_interruptible(&up->rx_queue);
                 }
 
                 up->dmx512rx.cur_idx++;
@@ -600,8 +607,8 @@ static void transmit485_chars(struct uart_nuc970_port *up)
         if(up->dmx512tx.p_start == up->dmx512tx.p_end)
         {
             __stop_tx(up);
-            atomic_set(&dmx512_tx_event, 1);
-            wake_up_interruptible(&dmx512_tx_waitq); 
+            atomic_set(&up->tx_condition, 1);
+            wake_up_interruptible(&up->tx_queue); 
             return;
         }
 
@@ -627,10 +634,6 @@ static irqreturn_t nuc970serial_interrupt(int irq, void *dev_id)
 {
 	struct uart_nuc970_port *up = (struct uart_nuc970_port *)dev_id;
 	volatile unsigned int isr;
-    volatile unsigned int *reg;
-
-    reg = (volatile unsigned int *)REG_GPIOI_DATAOUT;
-    __raw_writel(__raw_readl(reg) & (~(1<<14)), reg);
 
     if(up->rs485.flags & SER_RS485_ENABLED)
     {
@@ -666,8 +669,6 @@ static irqreturn_t nuc970serial_interrupt(int irq, void *dev_id)
     	if (isr & THRE_IF)
     		transmit_chars(up);
     }
-
-    __raw_writel(__raw_readl(reg) | (1<<14), reg);
 
 	return IRQ_HANDLED;
 }
@@ -1125,8 +1126,6 @@ void nuc970serial_config_rs485_dmx512rx(struct uart_port *port, struct serial_rs
 		
 	serial_out(p, UART_FUN_SEL, (serial_in(p, UART_FUN_SEL) | FUN_SEL_RS485) );
 
-	//rs485_start_rx(p);	// stay in Rx mode 	
-
 	if(rs485conf->flags & SER_RS485_RTS_ON_SEND)
 	{
 		serial_out(p, UART_REG_MCR, (serial_in(p, UART_REG_MCR) & ~0x200) );
@@ -1168,20 +1167,11 @@ void nuc970serial_config_rs485_dmx512rx(struct uart_port *port, struct serial_rs
         serial_out(p, UART_REG_TOR, 255);
     }
     
-    //two stop bit
-    //serial_out(p, UART_REG_LCR, serial_in(p, UART_REG_LCR) | (1<<2));
-
-    //enable RLS interupt
-    //serial_out(p, UART_REG_IER, serial_in(p, UART_REG_IER) | RLS_IF);
-
     //set force parity check to "1",for nine bit detect
     serial_out(p, UART_REG_LCR, serial_in(p, UART_REG_LCR) | PBE | EPE | SPE | BCB);
 
     //enable RTO RDA interupt
     serial_out(p, UART_REG_IER, serial_in(p, UART_REG_IER) | (RTO_IEN | RDA_IEN | TIME_OUT_EN));
-
-    printk("UART_REG_IER is 0x%08x\n", serial_in(p, UART_REG_IER));
-    printk("UART_REG_LCR is 0x%08x\n", serial_in(p, UART_REG_LCR));
 
 	spin_unlock(&port->lock);
 }
@@ -1205,14 +1195,43 @@ nuc970serial_rs485_mmap(struct uart_port *port, struct vm_area_struct * vma)
     return remap_pfn_range(vma, start, (virt_to_phys(p->pmmapbuf) >> PAGE_SHIFT), size, PAGE_SHARED);
 }
 
+static void generate_mark_for_dmx512tx(unsigned int port_line)
+{
+    unsigned int regRec;
+    volatile unsigned int *reg;
+    
+    //release uart,init for gpio,gpio mode,out,high
+    reg = tx_reg_func[port_line];
+    regRec = __raw_readl(reg);
+    __raw_writel(regRec & (~tx_pos_func[port_line]), reg);
+    reg = tx_reg_dir[port_line];
+    __raw_writel(__raw_readl(reg) | tx_pos_dir[port_line], reg);
+    reg = tx_reg_out[port_line];
+    __raw_writel(__raw_readl(reg) | tx_pos_out[port_line], reg);
+    
+    //generate mark time between packets
+    //msleep(1);
+    
+    //generate break info
+    reg = tx_reg_out[port_line];
+    __raw_writel(__raw_readl(reg) & (~tx_pos_out[port_line]), reg);
+    udelay(180);
+    __raw_writel(__raw_readl(reg) | tx_pos_out[port_line], reg);
+    
+    //generate mark after break info
+    udelay(30);
+    
+    //release gpio,restore for uart
+    reg = tx_reg_func[port_line];
+    __raw_writel(regRec, reg);
+}
+
 static int
 nuc970serial_rs485_ioctl(struct uart_port *port, unsigned int cmd, unsigned long arg)
 {
     struct uart_nuc970_port *p = to_nuc970_uart_port(port);
 	struct serial_rs485 rs485conf;
     struct dmx512_rx_status rx_status;
-    unsigned int regRec;
-    volatile unsigned int *reg;
     struct page *page;
     unsigned long isr_flags;
     int ret = 0;
@@ -1329,16 +1348,6 @@ nuc970serial_rs485_ioctl(struct uart_port *port, unsigned int cmd, unsigned long
 
             //config registers
             nuc970serial_config_rs485_dmx512rx(port, &rs485conf);
-
-            //----------------lzy debug
-            reg = (volatile unsigned int *)REG_MFP_GPI_H;
-            regRec = __raw_readl(reg);
-            __raw_writel(regRec & (~0x0F000000), reg);
-            reg = (volatile unsigned int *)REG_GPIOI_DIR;
-            __raw_writel(__raw_readl(reg) | (1<<14), reg);
-            reg = (volatile unsigned int *)REG_GPIOI_DATAOUT;
-            __raw_writel(__raw_readl(reg) | (1<<14), reg);
-            //-------------------------
         }
 		break;
         
@@ -1359,31 +1368,9 @@ nuc970serial_rs485_ioctl(struct uart_port *port, unsigned int cmd, unsigned long
         //init pointer
         p->dmx512tx.p_start = p->dmx512tx.p_data->buf;
         p->dmx512tx.p_end = p->dmx512tx.p_start + DMX512_DATA_LEN;
-        
-        //release uart,init for gpio,gpio mode,out,high
-        reg = (volatile unsigned int *)REG_MFP_GPI_L;
-        regRec = __raw_readl(reg);
-        __raw_writel(regRec & (~0xF0), reg);
-        reg = (volatile unsigned int *)REG_GPIOI_DIR;
-        __raw_writel(__raw_readl(reg) | (1<<1), reg);
-        reg = (volatile unsigned int *)REG_GPIOI_DATAOUT;
-        __raw_writel(__raw_readl(reg) | (1<<1), reg);
-        
-        //generate mark time between packets
-        //msleep(1);
-        
-        //generate break info
-        reg = (volatile unsigned int *)REG_GPIOI_DATAOUT;
-        __raw_writel(__raw_readl(reg) & (~(1<<1)), reg);
-        udelay(180);
-        __raw_writel(__raw_readl(reg) | (1<<1), reg);
-        
-        //generate mark after break info
-        udelay(30);
-        
-        //release gpio,restore for uart
-        reg = (volatile unsigned int *)REG_MFP_GPI_L;
-        __raw_writel(regRec, reg);
+
+        //gen mark
+        generate_mark_for_dmx512tx(p->port.line);
 
         //send empty
         serial_out(p, UART_REG_THR, 0);
@@ -1391,12 +1378,12 @@ nuc970serial_rs485_ioctl(struct uart_port *port, unsigned int cmd, unsigned long
         //uart send
         nuc970serial_start_tx(port);
 
-        atomic_set(&dmx512_tx_event, 0);
-        
-        if(atomic_read(&dmx512_tx_event) == 0)
+        if(atomic_read(&p->tx_condition) == 0)
         {
-            wait_event_interruptible_timeout(dmx512_tx_waitq, atomic_read(&dmx512_tx_event), 1*HZ);
+            wait_event_interruptible_timeout(p->tx_queue, atomic_read(&p->tx_condition), 1*HZ);
         }
+
+        atomic_set(&p->tx_condition, 0);
 
         //mutex unlock
         mutex_unlock(&p->dmx512tx.mutex_lock);
@@ -1405,9 +1392,9 @@ nuc970serial_rs485_ioctl(struct uart_port *port, unsigned int cmd, unsigned long
         //mutex lock
         mutex_lock(&p->dmx512rx.mutex_lock);
 
-        if(atomic_read(&dmx512_rx_event) == 0)
+        if(atomic_read(&p->rx_condition) == 0)
         {
-            ret = wait_event_interruptible_timeout(dmx512_rx_waitq, atomic_read(&dmx512_rx_event), 1*HZ);
+            ret = wait_event_interruptible_timeout(p->rx_queue, atomic_read(&p->rx_condition), 1*HZ);
             if(ret == 0)
             {
                 ret = -1;
@@ -1418,7 +1405,7 @@ nuc970serial_rs485_ioctl(struct uart_port *port, unsigned int cmd, unsigned long
             }
         }
 
-        atomic_set(&dmx512_rx_event, 0);
+        atomic_set(&p->rx_condition, 0);
 
         //mutex unlock
         mutex_unlock(&p->dmx512rx.mutex_lock);
@@ -1978,6 +1965,14 @@ static int nuc970serial_probe(struct platform_device *pdev)
         memset((char *)&up->dmx512tx, 0, sizeof(struct dmx512_tx));
         memset((char *)&up->dmx512rx, 0, sizeof(struct dmx512_rx));
         memset((char *)&up->dmx512rx_status, 0, sizeof(struct dmx512_rx_status));
+
+        //init tx wait q
+        init_waitqueue_head(&up->tx_queue);
+        atomic_set(&up->tx_condition, 0);
+                
+        //init rx wait q
+        init_waitqueue_head(&up->rx_queue);
+        atomic_set(&up->rx_condition, 0);
 
 		ret = uart_add_one_port(&nuc970serial_reg, &up->port);
 
