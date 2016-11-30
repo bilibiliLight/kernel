@@ -110,7 +110,7 @@ struct dmx512_config_tx {
 
 struct dmx512_config_rx {
     unsigned int record_frames;
-    unsigned int sample_rate;
+    unsigned int skip_frames;
     unsigned int frame_timeout;
 };
 

@@ -128,13 +128,13 @@ struct uart_nuc970_port {
 				      unsigned int state, unsigned int old);
 };
 
-//uart0-10:PE0,PE2,PE11,PE12,PH8,PB0,PB2,PI1,PI12,PD11,PB12
-volatile unsigned int * tx_reg_func[11] = {    REG_MFP_GPE_L,     REG_MFP_GPE_L,    REG_MFP_GPE_H,      REG_MFP_GPE_H,     REG_MFP_GPH_H,     REG_MFP_GPB_L,     REG_MFP_GPB_L,     REG_MFP_GPI_L,     REG_MFP_GPI_H,     REG_MFP_GPD_H,     REG_MFP_GPB_H};
-unsigned int            tx_pos_func[11] = {      0x0F<<(4*0),       0x0F<<(4*2), 0x0F<<(4*(11-8)),  0x0F<<(4*(12-8)),   0x0F<<(4*(8-8)),       0x0F<<(4*0),       0x0F<<(4*2),       0x0F<<(4*1),  0x0F<<(4*(12-8)),  0x0F<<(4*(11-8)),  0x0F<<(4*(12-8))};
-volatile unsigned int *  tx_reg_dir[11] = {    REG_GPIOE_DIR,     REG_GPIOE_DIR,    REG_GPIOE_DIR,      REG_GPIOE_DIR,     REG_GPIOH_DIR,     REG_GPIOB_DIR,     REG_GPIOB_DIR,     REG_GPIOI_DIR,     REG_GPIOI_DIR,     REG_GPIOD_DIR,     REG_GPIOB_DIR};
-unsigned int             tx_pos_dir[11] = {      0x01<<(1*0),       0x01<<(1*2),     0x01<<(1*11),       0x01<<(1*12),       0x01<<(1*8),       0x01<<(1*0),       0x01<<(1*2),       0x01<<(1*1),      0x01<<(1*12),      0x01<<(1*11),      0x01<<(1*12)};
-volatile unsigned int *  tx_reg_out[11] = {REG_GPIOE_DATAOUT, REG_GPIOE_DATAOUT, REG_GPIOE_DATAOUT, REG_GPIOE_DATAOUT, REG_GPIOH_DATAOUT, REG_GPIOB_DATAOUT, REG_GPIOB_DATAOUT, REG_GPIOI_DATAOUT, REG_GPIOI_DATAOUT, REG_GPIOD_DATAOUT, REG_GPIOB_DATAOUT};
-unsigned int             tx_pos_out[11] = {      0x01<<(1*0),       0x01<<(1*2),     0x01<<(1*11),       0x01<<(1*12),       0x01<<(1*8),       0x01<<(1*0),       0x01<<(1*2),       0x01<<(1*1),      0x01<<(1*12),      0x01<<(1*11),      0x01<<(1*12)};
+//uart0-10:PE0,PE2,PF11,PE12,PH8,PB0,PG11,PI1,PH12,PH2,PB12
+volatile unsigned int * tx_reg_func[11] = {    REG_MFP_GPE_L,     REG_MFP_GPE_L,     REG_MFP_GPF_H,     REG_MFP_GPE_H,     REG_MFP_GPH_H,     REG_MFP_GPB_L,     REG_MFP_GPG_H,     REG_MFP_GPI_L,     REG_MFP_GPH_H,     REG_MFP_GPH_L,     REG_MFP_GPB_H};
+unsigned int            tx_pos_func[11] = {      0x0F<<(4*0),       0x0F<<(4*2),  0x0F<<(4*(11-8)), 0x0F<<(4*(12-8)),   0x0F<<(4*(8-8)),       0x0F<<(4*0),  0x0F<<(4*(11-8)),       0x0F<<(4*1), 0x0F<<(4*(12-8)),       0x0F<<(4*2),  0x0F<<(4*(12-8))};
+volatile unsigned int *  tx_reg_dir[11] = {    REG_GPIOE_DIR,     REG_GPIOE_DIR,     REG_GPIOF_DIR,     REG_GPIOE_DIR,     REG_GPIOH_DIR,     REG_GPIOB_DIR,     REG_GPIOG_DIR,     REG_GPIOI_DIR,     REG_GPIOH_DIR,     REG_GPIOH_DIR,     REG_GPIOB_DIR};
+unsigned int             tx_pos_dir[11] = {      0x01<<(1*0),       0x01<<(1*2),      0x01<<(1*11),      0x01<<(1*12),       0x01<<(1*8),       0x01<<(1*0),      0x01<<(1*11),       0x01<<(1*1),      0x01<<(1*12),       0x01<<(1*2),      0x01<<(1*12)};
+volatile unsigned int *  tx_reg_out[11] = {REG_GPIOE_DATAOUT, REG_GPIOE_DATAOUT, REG_GPIOF_DATAOUT, REG_GPIOE_DATAOUT, REG_GPIOH_DATAOUT, REG_GPIOB_DATAOUT, REG_GPIOG_DATAOUT, REG_GPIOI_DATAOUT, REG_GPIOH_DATAOUT, REG_GPIOH_DATAOUT, REG_GPIOB_DATAOUT};
+unsigned int             tx_pos_out[11] = {      0x01<<(1*0),       0x01<<(1*2),      0x01<<(1*11),      0x01<<(1*12),       0x01<<(1*8),       0x01<<(1*0),      0x01<<(1*11),       0x01<<(1*1),      0x01<<(1*12),       0x01<<(1*2),      0x01<<(1*12)};
 
 static struct uart_nuc970_port nuc970serial_ports[UART_NR];
 
@@ -1146,7 +1146,7 @@ void nuc970serial_config_rs485_dmx512rx(struct uart_port *port, struct serial_rs
     serial_out(p, UART_REG_FCR, serial_in(p, UART_REG_FCR) | 0x30);
 
     //disable bit9 is "0" data
-    serial_out(p, UART_REG_FCR, serial_in(p, UART_REG_FCR) | (1 << 8));
+    //serial_out(p, UART_REG_FCR, serial_in(p, UART_REG_FCR) | (1 << 8));
 
     //set tor is max, buad 250000 is 1020us
     timeout = p->rs485.rx_config.frame_timeout / 4;
@@ -1394,7 +1394,7 @@ nuc970serial_rs485_ioctl(struct uart_port *port, unsigned int cmd, unsigned long
 
         if(atomic_read(&p->rx_condition) == 0)
         {
-            ret = wait_event_interruptible_timeout(p->rx_queue, atomic_read(&p->rx_condition), 1*HZ);
+            ret = wait_event_interruptible_timeout(p->rx_queue, atomic_read(&p->rx_condition), 1*HZ / 100);
             if(ret == 0)
             {
                 ret = -1;

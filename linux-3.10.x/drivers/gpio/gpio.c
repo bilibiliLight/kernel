@@ -145,6 +145,14 @@ static int gpio_get_pin_number(unsigned long arg)
     return pin_number;
 }
 
+int check_pin(unsigned long arg)
+{
+    if((arg > GPIO_TO_PIN(9, 4)) || (arg < GPIO_TO_PIN(0, 0)))
+        return -1;
+    else
+        return 0;
+}
+
 /*
  * The ioctl() implementation
  */
@@ -185,6 +193,12 @@ static long gpio_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
     }
     __D(KERN_NOTICE, " cmd can be accessed \n");
 
+    if (check_pin(arg) != 0)
+    {
+        __E(KERN_ALERT, "pin number error\n");
+        return -EFAULT;
+    }
+    pin_number = arg;
 
     switch (cmd)
     {
@@ -192,12 +206,6 @@ static long gpio_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
     case SCALE_GPIO_IOC_RESET:
         break;
     case SCALE_GPIO_IOC_INPUT:
-        pin_number = gpio_get_pin_number(arg);
-        if (!pin_number)
-        {
-            __E(KERN_ALERT, "get pin number error\n");
-            return -EFAULT;
-        }
         gpio_request(pin_number, "gpioin");
         gpio_direction_input(pin_number);
         retval = gpio_get_value(pin_number);
@@ -205,23 +213,11 @@ static long gpio_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 
         break;
     case SCALE_GPIO_IOC_OUTPUT_HIGHT:
-        pin_number = gpio_get_pin_number(arg);
-        if (!pin_number)
-        {
-            __E(KERN_ALERT, "get pin number error\n");
-            return -EFAULT;
-        }
         gpio_request(pin_number, "gpioout");
         gpio_direction_output(pin_number, 1);
         gpio_set_value(pin_number, 1);
         break;
     case SCALE_GPIO_IOC_OUTPUT_LOW:
-        pin_number = gpio_get_pin_number(arg);
-        if (!pin_number)
-        {
-            __E(KERN_ALERT, "get pin number error\n");
-            return -EFAULT;
-        }
         gpio_request(pin_number, "gpioout");
         gpio_direction_output(pin_number, 0);
         gpio_set_value(pin_number, 0);
