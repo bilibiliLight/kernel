@@ -122,20 +122,18 @@ struct dmx512_config_rx {
  */
 
 struct serial_rs485 {
-	__u32	flags;			/* RS485 feature flags */
-#define SER_RS485_ENABLED		(1 << 0)	/* If enabled */
-#define SER_RS485_RTS_ON_SEND		(1 << 1)	/* Logical level for
-							   RTS pin when
-							   sending */
-#define SER_RS485_RTS_AFTER_SEND	(1 << 2)	/* Logical level for
-							   RTS pin after sent*/
-#define SER_RS485_RX_DURING_TX		(1 << 4)
-	__u32	delay_rts_before_send;	/* Delay before send (milliseconds) */
-	__u32	delay_rts_after_send;	/* Delay after send (milliseconds) */
-	__u32	padding[5];		/* Memory is cheap, new structs
-					   are a royal PITA .. */
-#define SER_RS485_DMX512_TX		    (1 << 8)
-#define SER_RS485_DMX512_RX		    (1 << 16)
+#define SER_RS485_ENABLED		    (1 << 0)	/* If enabled */
+#define SER_RS485_RTS_ON_SEND		(1 << 1)	/* Logical level for RTS pin when sending */
+#define SER_RS485_RTS_AFTER_SEND	(1 << 2)	/* Logical level for RTS pin after sent*/
+#define SER_RS485_RX_DURING_TX		(1 << 3)
+#define SER_RS485_DMX512_TX		    (1 << 4)
+#define SER_RS485_DMX512_RX		    (1 << 5)
+#define SER_RS485_DMX512_PAUSE      (1 << 6)
+
+	__u32	                flags;			    /* RS485 feature flags */
+	__u32	                delay_rts_before_send;	/* Delay before send (milliseconds) */
+	__u32	                delay_rts_after_send;	/* Delay after send (milliseconds) */
+	__u32	                padding[5];		    /* Memory is cheap, new structs are a royal PITA .. */
     struct dmx512_config_tx tx_config;
     struct dmx512_config_rx rx_config;
 };

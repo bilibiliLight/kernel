@@ -11,6 +11,9 @@ source "drivers/tty/serial/8250/Kconfig"
 
 comment "Non-8250 serial port support"
 
+config DMX512
+	bool "dmx512"
+
 config SERIAL_NUC970
 	bool "NUC970 serial support"
 	select SERIAL_CORE
