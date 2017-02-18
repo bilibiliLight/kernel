@@ -33,6 +33,14 @@ typedef struct gpio_cfg
 #define SCALE_GPIO_IOC_OUTPUT_LOW       _IOW(SCALE_MAGIC, 0xa2, unsigned long)
 #define SCALE_GPIO_IOC_OUTPUT_HIGHT     _IOW(SCALE_MAGIC, 0xa3, unsigned long)
 
+//FOR TRACE
+#define SCALE_GPIO_IOC_TRACE_INIT       _IOW(SCALE_MAGIC, 0xb0, unsigned long)
+#define SCALE_GPIO_IOC_TRACE_DELAY      _IOW(SCALE_MAGIC, 0xb1, unsigned long)
+
+//FOR DETECT
+#define SCALE_GPIO_IOC_DETECT_INIT      _IOW(SCALE_MAGIC, 0xb2, unsigned long)
+#define SCALE_GPIO_IOC_DETECT_REINIT    _IOW(SCALE_MAGIC, 0xb3, unsigned long)
+
 #define SCALE_IOC_MAXNR 0xF0
 
 /* Convert GPIO signal to GPIO pin number */

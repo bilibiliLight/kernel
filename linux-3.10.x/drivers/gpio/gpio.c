@@ -18,6 +18,58 @@
 
 #include <asm/uaccess.h>	/* copy_*_user */
 
+#include <mach/map.h>
+#include <mach/regs-serial.h>
+#include <mach/regs-gcr.h>
+#include <mach/regs-gpio.h>
+#include <mach/mfp.h>
+
+#include <linux/wait.h>
+#include <linux/module.h>
+#include <linux/moduleparam.h>
+#include <linux/ioport.h>
+#include <linux/init.h>
+#include <linux/console.h>
+#include <linux/sysrq.h>
+#include <linux/delay.h>
+#include <linux/platform_device.h>
+#include <linux/tty.h>
+#include <linux/tty_flip.h>
+#include <linux/clk.h>
+#include <linux/serial_reg.h>
+#include <linux/serial_core.h>
+#include <linux/serial.h>
+#include <linux/nmi.h>
+#include <linux/mutex.h>
+#include <linux/slab.h>
+#include <linux/uaccess.h>
+#include <linux/slab.h>
+#include <linux/mm.h>
+
+#include <asm/io.h>
+#include <asm/irq.h>
+#include <asm/serial.h>
+
+#include <linux/kernel.h>
+#include <linux/init.h>
+#include <linux/errno.h>
+#include <linux/spinlock.h>
+#include <linux/module.h>
+#include <linux/proc_fs.h>
+#include <linux/fs.h>
+#include <linux/io.h>
+#include <linux/irq.h>
+#include <linux/cdev.h>
+#include <linux/gpio.h>
+#include <linux/string.h>
+#include <linux/interrupt.h>
+#include <linux/delay.h>
+#include <linux/device.h>
+#include <linux/sched.h>
+
+
+struct fasync_struct *detect_async;
+
 MODULE_AUTHOR("CDJZ-TECH, ALAN");
 MODULE_LICENSE("GPL");
 
@@ -41,6 +93,7 @@ struct gpio_dev
     unsigned long size;       /* amount of data stored here */
     struct semaphore sem;     /* mutual exclusion semaphore     */
     struct cdev cdev;	  /* Char device structure		*/
+    struct timer_list trace_timer;
 };
 
 static struct class *gpio_class;
@@ -58,11 +111,24 @@ static struct class *gpio_class;
 int gpio_major =   GPIO_MAJOR;
 int gpio_minor =   0;
 static unsigned char gpio_inc = 0;
+static unsigned int gpio_delay_time = 0;
+static unsigned int gpio_trace_flag = 0;
+static unsigned int gpio_valid_input_flag = 0;
+static unsigned int gpio_has_irq_flag = 0;
+
+wait_queue_head_t   trace_queue;
+atomic_t            trace_condition;
+
 
 struct gpio_dev *gpio_dev;
 
 #define DEVICENAME "scale-gpio"
+#define TRACE_TIMER_PERIOD      50
 
+static ssize_t detect_fasync(int fd, struct file *filp, int on)
+{
+    return fasync_helper(fd, filp, on, &detect_async);
+}
 
 static ssize_t gpio_open(struct inode *inode, struct file *filp)
 {
@@ -153,6 +219,92 @@ int check_pin(unsigned long arg)
         return 0;
 }
 
+static irqreturn_t gpio_trace_interrupt(int irq, void *dev_id)
+{
+    volatile unsigned int *reg;
+    
+    //ISR,'1' to clear
+    reg = REG_GPIOH_ISR;
+    __raw_writel(__raw_readl(reg) | (0x01<<(1*4)), reg);
+
+    //wake up trace pin
+    if(gpio_trace_flag > 0)
+    {
+        atomic_set(&trace_condition, 1);
+        wake_up_interruptible(&trace_queue);
+    }
+
+    gpio_has_irq_flag = 1;
+
+    return IRQ_HANDLED;
+}
+
+static irqreturn_t gpio_detect_interrupt(int irq, void *dev_id)
+{
+    volatile unsigned int *reg;
+
+    //disable this irq
+    //IREN,'1' rissing edge enable
+    reg = REG_GPIOH_IREN;
+    __raw_writel(__raw_readl(reg) & (~(0x01<<(1*5))), reg);
+
+    //IFEN,'1' falling edge enable
+    reg = REG_GPIOH_IFEN;
+    __raw_writel(__raw_readl(reg) & (~(0x01<<(1*5))), reg);
+
+    //send sig
+    kill_fasync(&detect_async, SIGIO, POLL_IN);
+
+    //ISR,'1' to clear
+    reg = REG_GPIOH_ISR;
+    __raw_writel(__raw_readl(reg) | (0x01<<(1*5)), reg);
+    
+    return IRQ_HANDLED;
+}
+
+void trace_control(void)
+{
+    int ret;
+    
+    if(gpio_trace_flag > 0)
+    {
+        atomic_set(&trace_condition, 0);
+        
+        if(atomic_read(&trace_condition) == 0)
+        {
+            ret = wait_event_interruptible_timeout(trace_queue, atomic_read(&trace_condition), 1*HZ/20);
+            if(ret != 0)
+            {
+                if(gpio_delay_time > 0)
+                {
+                    udelay(gpio_delay_time); 
+                }
+            }
+        }
+
+        gpio_delay_time = 0;
+        gpio_trace_flag = 0;
+    }
+}
+
+static void trace_do_timer(unsigned long arg)
+{
+    struct gpio_dev *dev = (struct gpio_dev *)(arg);
+
+    dev->trace_timer.expires = jiffies + HZ * TRACE_TIMER_PERIOD / 1000;
+    add_timer(&dev->trace_timer);
+
+    if(gpio_has_irq_flag)
+    {
+        gpio_valid_input_flag = 1;
+        gpio_has_irq_flag = 0;
+    }
+    else
+    {
+        gpio_valid_input_flag = 0;
+    }
+}
+
 /*
  * The ioctl() implementation
  */
@@ -162,6 +314,9 @@ static long gpio_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
     int err = 0;
     int retval = 0;
     int pin_number = 0;
+    int irq;
+    volatile unsigned int *reg;
+    struct gpio_dev *dev;
 
     __D(KERN_NOTICE, " gpio_ioctl \n");
 
@@ -193,6 +348,33 @@ static long gpio_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
     }
     __D(KERN_NOTICE, " cmd can be accessed \n");
 
+    switch (cmd)
+    {
+    case SCALE_GPIO_IOC_TRACE_DELAY:
+        //trace delay
+        if(gpio_valid_input_flag > 0)
+        {
+            gpio_delay_time = (arg > 0)?arg:0;
+            gpio_trace_flag = 1;
+        }
+        return retval;
+    case SCALE_GPIO_IOC_DETECT_REINIT:
+        //IREN,'1' rissing edge enable
+        reg = REG_GPIOH_IREN;
+        __raw_writel(__raw_readl(reg) | (0x01<<(1*5)), reg);
+
+        //IFEN,'1' falling edge enable
+        reg = REG_GPIOH_IFEN;
+        __raw_writel(__raw_readl(reg) | (0x01<<(1*5)), reg);
+
+        //ISR,'1' to clear
+        reg = REG_GPIOH_ISR;
+        __raw_writel(__raw_readl(reg) | (0x01<<(1*5)), reg);
+        return retval;
+    default:
+        break;
+    }
+
     if (check_pin(arg) != 0)
     {
         __E(KERN_ALERT, "pin number error\n");
@@ -213,14 +395,86 @@ static long gpio_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 
         break;
     case SCALE_GPIO_IOC_OUTPUT_HIGHT:
+        trace_control();
         gpio_request(pin_number, "gpioout");
         gpio_direction_output(pin_number, 1);
         gpio_set_value(pin_number, 1);
         break;
     case SCALE_GPIO_IOC_OUTPUT_LOW:
+        trace_control();
         gpio_request(pin_number, "gpioout");
         gpio_direction_output(pin_number, 0);
         gpio_set_value(pin_number, 0);
+        break;
+    case SCALE_GPIO_IOC_TRACE_INIT:
+        //trace pin init
+        pin_number = GPIO_TO_PIN(7, 4);
+        gpio_request(pin_number, "gpioin");
+        gpio_direction_input(pin_number);
+        irq = gpio_to_irq(pin_number);
+        retval = request_irq(irq, gpio_trace_interrupt, 0, "trace pin irq", NULL);
+    	if (retval) {
+    		printk("request trace pin irq failed...\n");
+    		return retval;
+    	}
+
+        //control pin is PH4,init register
+        //IMD,'0' edge
+        reg = REG_GPIOH_IMD;
+        __raw_writel(__raw_readl(reg) & (~(0x01<<(1*4))), reg);
+
+        //IREN,'1' rissing edge enable
+        reg = REG_GPIOH_IREN;
+        __raw_writel(__raw_readl(reg) | (0x01<<(1*4)), reg);
+
+        //IFEN,'1' falling edge enable
+        reg = REG_GPIOH_IFEN;
+        __raw_writel(__raw_readl(reg) | (0x01<<(1*4)), reg);
+
+        //ISR,'1' to clear
+        reg = REG_GPIOH_ISR;
+        __raw_writel(__raw_readl(reg) | (0x01<<(1*4)), reg);
+
+        //init wait q
+        init_waitqueue_head(&trace_queue);
+        atomic_set(&trace_condition, 0);
+
+        //create cycle check timer
+        dev = (struct gpio_dev *)filp->private_data;
+        init_timer(&dev->trace_timer);
+        dev->trace_timer.function = &trace_do_timer;
+        dev->trace_timer.data = (unsigned long)dev;
+        dev->trace_timer.expires = jiffies + HZ * TRACE_TIMER_PERIOD / 1000;
+        add_timer(&dev->trace_timer);
+        break;
+    case SCALE_GPIO_IOC_DETECT_INIT:
+        //detect init
+        pin_number = GPIO_TO_PIN(7, 5);
+        gpio_request(pin_number, "gpioin");
+        gpio_direction_input(pin_number);
+        irq = gpio_to_irq(pin_number);
+        retval = request_irq(irq, gpio_detect_interrupt, 0, "detect pin irq", NULL);
+    	if (retval) {
+    		printk("request detect pin irq failed...\n");
+    		return retval;
+    	}
+
+        //control pin is PH5,init register
+        //IMD,'0' edge
+        reg = REG_GPIOH_IMD;
+        __raw_writel(__raw_readl(reg) & (~(0x01<<(1*5))), reg);
+
+        //IREN,'1' rissing edge enable
+        reg = REG_GPIOH_IREN;
+        __raw_writel(__raw_readl(reg) | (0x01<<(1*5)), reg);
+
+        //IFEN,'1' falling edge enable
+        reg = REG_GPIOH_IFEN;
+        __raw_writel(__raw_readl(reg) | (0x01<<(1*5)), reg);
+
+        //ISR,'1' to clear
+        reg = REG_GPIOH_ISR;
+        __raw_writel(__raw_readl(reg) | (0x01<<(1*5)), reg);
         break;
 
     default:
@@ -230,12 +484,14 @@ static long gpio_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
     return retval;
 }
 
-
 static ssize_t gpio_release(struct inode *inode, struct file *filp)
 {
     gpio_inc --;
 
     __D(KERN_NOTICE, " release \n");
+
+    detect_fasync(-1, filp, 0);
+    
     return 0;
 }
 
@@ -248,6 +504,7 @@ struct file_operations gpio_fops =
     .write   = gpio_write,
     .release = gpio_release,
     .unlocked_ioctl   = gpio_ioctl,
+    .fasync = detect_fasync,
 };
 
 static void gpio_cleanup_module(void)
