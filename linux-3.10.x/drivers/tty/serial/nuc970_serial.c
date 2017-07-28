@@ -48,6 +48,7 @@
 #include <mach/regs-gpio.h>
 #include <mach/mfp.h>
 
+#include <asm/div64.h>
 
 #include "nuc970_serial.h"
 
@@ -61,8 +62,9 @@
 #define TIOCDMX512RXPAUSE       0x5466
 #define TIOCDMX512RXCONTINUE    0x5467
 #define TIOCDMX512RXSTATUS      0x5468
-#define TIOCBIT9ADDR            0x5469
-#define TIOCBIT9DATA            0x546A
+#define TIOCDMX512TXSTATUS      0x5469
+#define TIOCBIT9ADDR            0x546A
+#define TIOCBIT9DATA            0x546B
 
 static struct uart_driver nuc970serial_reg;
 
@@ -91,8 +93,18 @@ struct dmx512_rx {
     int total_num;
 };
 
+struct dmx512_timer {
+    struct timeval last_tv;
+    struct timeval total_diff;
+    unsigned long diff_time;
+    unsigned long max_diff;
+    unsigned long min_diff;
+};
+
 struct dmx512_rx_status {
     unsigned int cur_frame;
+    unsigned long frame_freq;
+    struct dmx512_timer rx_timer;
 
 #define DMX512_RX_STATUS_DONE     (1<<0)
 #define DMX512_RX_STATUS_BREAK    (1<<1)
@@ -100,6 +112,13 @@ struct dmx512_rx_status {
 #define DMX512_RX_STATUS_CHLOST   (1<<3)
 #define DMX512_RX_STATUS_CACHE    (1<<4)
     unsigned int flags;
+};
+
+struct dmx512_tx_status {
+    struct dmx512_time_seq cur_time_seq;
+    dmx512_time_seq_mode cur_mode;
+    unsigned long cur_frame_freq;
+    struct dmx512_timer tx_timer;
 };
 
 struct uart_nuc970_port {
@@ -115,6 +134,7 @@ struct uart_nuc970_port {
 	struct serial_rs485     rs485;          /* rs485 settings */
     struct dmx512_tx    dmx512tx;     /* dmx512 send data */
     struct dmx512_rx    dmx512rx;     /* dmx512 receive data */
+    struct dmx512_tx_status dmx512tx_status; /* status of dmx512 tx */
     struct dmx512_rx_status dmx512rx_status; /* status of dmx512 rx */
     char                *pmmapbuf;    /* mmap to user buf */
     char                *palloctxbuf;       /* alloc for dmx512 send */
@@ -352,8 +372,208 @@ static void transmit_chars(struct uart_nuc970_port *up)
 		__stop_tx(up);
 }
 
+static int get_diff_time(struct timeval *pafter, struct timeval *pbefore, unsigned long *pdiff)
+{
+    int valid_flag;
+
+    if((pafter == NULL) || (pbefore == NULL) || (pdiff == NULL))
+        return -1;
+
+    //check valid
+    if(pafter->tv_usec >= pbefore->tv_usec)
+    {
+        if((pafter->tv_sec >= pbefore->tv_sec) && (pafter->tv_sec - pbefore->tv_sec <= 0xFFFFFFFF / 1000000))
+        {
+            //valid
+            valid_flag = 0;
+            *pdiff = (pafter->tv_sec - pbefore->tv_sec) * 1000000 + (pafter->tv_usec - pbefore->tv_usec);
+        }
+        else
+        {
+            //invalid
+            valid_flag = -1;
+        }
+    }
+    else
+    {
+        if((pafter->tv_sec > pbefore->tv_sec) && (pafter->tv_sec - pbefore->tv_sec <= 0xFFFFFFFF / 1000000))
+        {
+            //valid
+            valid_flag = 0;
+            *pdiff = (pafter->tv_sec - 1 - pbefore->tv_sec) * 1000000 + (pafter->tv_usec + 1000000 - pbefore->tv_usec);
+        }
+        else
+        {
+            //invalid
+            valid_flag = -1;
+        }
+    }
+
+    return valid_flag;
+}
+
+static void dmx512_rx_timer_handle(struct uart_nuc970_port *up)
+{
+    struct timeval cur_tv;
+    unsigned long t_usec;
+
+    do_gettimeofday(&cur_tv);
+    
+    if(up->dmx512rx_status.cur_frame == 0)
+    {
+        //first frame only record
+        up->dmx512rx_status.rx_timer.max_diff = 0;
+        up->dmx512rx_status.rx_timer.min_diff = 0xFFFFFFFF;
+        up->dmx512rx_status.rx_timer.diff_time = 0;
+        up->dmx512rx_status.rx_timer.total_diff.tv_sec = 0;
+        up->dmx512rx_status.rx_timer.total_diff.tv_usec = 0;
+        memcpy(&up->dmx512rx_status.rx_timer.last_tv, &cur_tv, sizeof(struct timeval));
+    }
+    else if(up->rs485.flags & SER_RS485_DMX512_PAUSE)
+    {
+        //diff,max,min time maintain the last
+        t_usec = up->dmx512rx_status.rx_timer.total_diff.tv_usec;
+        t_usec += up->dmx512rx_status.rx_timer.diff_time;
+        up->dmx512rx_status.rx_timer.total_diff.tv_sec += t_usec / 1000000;
+        up->dmx512rx_status.rx_timer.total_diff.tv_usec = t_usec % 1000000;
+        
+        memcpy(&up->dmx512rx_status.rx_timer.last_tv, &cur_tv, sizeof(struct timeval));
+    }
+    else
+    {
+        if(get_diff_time(&cur_tv, &up->dmx512rx_status.rx_timer.last_tv, &up->dmx512rx_status.rx_timer.diff_time) == 0)
+        {            
+            //find max diff time
+            if(up->dmx512rx_status.rx_timer.max_diff < up->dmx512rx_status.rx_timer.diff_time)
+            {
+                up->dmx512rx_status.rx_timer.max_diff = up->dmx512rx_status.rx_timer.diff_time;
+            }
+
+            //find min diff time
+            if(up->dmx512rx_status.rx_timer.min_diff > up->dmx512rx_status.rx_timer.diff_time)
+            {
+                up->dmx512rx_status.rx_timer.min_diff = up->dmx512rx_status.rx_timer.diff_time;
+            }
+
+            //total diff time
+            t_usec = up->dmx512rx_status.rx_timer.total_diff.tv_usec;
+            t_usec += up->dmx512rx_status.rx_timer.diff_time;
+            up->dmx512rx_status.rx_timer.total_diff.tv_sec += t_usec / 1000000;
+            up->dmx512rx_status.rx_timer.total_diff.tv_usec = t_usec % 1000000;
+        }
+        else
+        {
+            up->dmx512rx_status.rx_timer.max_diff = 0;
+            up->dmx512rx_status.rx_timer.min_diff = 0xFFFFFFFF;
+            up->dmx512rx_status.rx_timer.diff_time = 0;
+            up->dmx512rx_status.rx_timer.total_diff.tv_sec = 0;
+            up->dmx512rx_status.rx_timer.total_diff.tv_usec = 0;
+        }
+        
+        //record last timeval
+        memcpy(&up->dmx512rx_status.rx_timer.last_tv, &cur_tv, sizeof(struct timeval));
+    }
+}
+
+static void dmx512_tx_timer_handle(struct uart_nuc970_port *up)
+{
+    struct timeval cur_tv;
+    unsigned long t_usec;
+
+    //fix mtbp_time manual
+    switch(up->dmx512tx_status.cur_mode)
+    {
+        case SET_WITH_SEQ:
+            udelay(up->dmx512tx_status.cur_time_seq.mtbp_time);
+            break;
+        default:
+            break;
+    }
+
+    do_gettimeofday(&cur_tv);
+
+    if((up->dmx512tx_status.tx_timer.last_tv.tv_sec == 0) && (up->dmx512tx_status.tx_timer.last_tv.tv_usec == 0))
+    {
+        //first frame only record
+        up->dmx512tx_status.tx_timer.max_diff = 0;
+        up->dmx512tx_status.tx_timer.min_diff = 0xFFFFFFFF;
+        up->dmx512tx_status.tx_timer.diff_time = 0;
+        up->dmx512tx_status.tx_timer.total_diff.tv_sec = 0;
+        up->dmx512tx_status.tx_timer.total_diff.tv_usec = 0;
+        memcpy(&up->dmx512tx_status.tx_timer.last_tv, &cur_tv, sizeof(struct timeval));
+    }
+    else
+    {
+        if(get_diff_time(&cur_tv, &up->dmx512tx_status.tx_timer.last_tv, &up->dmx512tx_status.tx_timer.diff_time) == 0)
+        {
+            //fix mtbp_time auto
+            switch(up->dmx512tx_status.cur_mode)
+            {
+                case SET_WITH_SEQ:
+                    up->dmx512tx_status.cur_time_seq.period = up->dmx512tx_status.tx_timer.diff_time;
+                    up->dmx512tx_status.cur_frame_freq = 1000 * 1000 * 1000 / up->dmx512tx_status.tx_timer.diff_time;
+                    up->dmx512tx_status.cur_time_seq.freq = up->dmx512tx_status.cur_frame_freq;
+                    break;
+                case SET_WITH_SEQ_AND_PERIOD:
+                case SET_WITH_FREQ:
+                default:
+                    if(up->dmx512tx_status.tx_timer.diff_time < up->dmx512tx_status.cur_time_seq.period)
+                    {
+                        up->dmx512tx_status.cur_time_seq.mtbp_time = up->dmx512tx_status.cur_time_seq.period - up->dmx512tx_status.tx_timer.diff_time;
+                        udelay(up->dmx512tx_status.cur_time_seq.mtbp_time);
+
+                        do_gettimeofday(&cur_tv);
+
+                        if(get_diff_time(&cur_tv, &up->dmx512tx_status.tx_timer.last_tv, &up->dmx512tx_status.tx_timer.diff_time) == 0)
+                        {
+                            //find max diff time
+                            if(up->dmx512tx_status.tx_timer.max_diff < up->dmx512tx_status.tx_timer.diff_time)
+                            {
+                                up->dmx512tx_status.tx_timer.max_diff = up->dmx512tx_status.tx_timer.diff_time;
+                            }
+
+                            //find min diff time
+                            if(up->dmx512tx_status.tx_timer.min_diff > up->dmx512tx_status.tx_timer.diff_time)
+                            {
+                                up->dmx512tx_status.tx_timer.min_diff = up->dmx512tx_status.tx_timer.diff_time;
+                            }
+
+                            //total diff time
+                            t_usec = up->dmx512tx_status.tx_timer.total_diff.tv_usec;
+                            t_usec += up->dmx512tx_status.tx_timer.diff_time;
+                            up->dmx512tx_status.tx_timer.total_diff.tv_sec += t_usec / 1000000;
+                            up->dmx512tx_status.tx_timer.total_diff.tv_usec = t_usec % 1000000;
+                            
+                            up->dmx512tx_status.cur_frame_freq = 1000 * 1000 * 1000 / up->dmx512tx_status.tx_timer.diff_time;
+                        }            
+                    }
+                    else
+                    {
+                        up->dmx512tx_status.cur_frame_freq = 1000 * 1000 * 1000 / up->dmx512tx_status.tx_timer.diff_time;
+                    }
+                    break;
+            }
+        }
+        else
+        {
+            up->dmx512tx_status.tx_timer.max_diff = 0;
+            up->dmx512tx_status.tx_timer.min_diff = 0xFFFFFFFF;
+            up->dmx512tx_status.tx_timer.diff_time = 0;
+            up->dmx512tx_status.tx_timer.total_diff.tv_sec = 0;
+            up->dmx512tx_status.tx_timer.total_diff.tv_usec = 0;
+        }
+
+        //record last timeval
+        memcpy(&up->dmx512tx_status.tx_timer.last_tv, &cur_tv, sizeof(struct timeval));
+    }
+}
+
 static void dmx512_rx_handle_done(struct uart_nuc970_port *up, unsigned int flags)
 {
+    unsigned long long cal_m, cal_d;
+    unsigned long cal_mod;
+    unsigned int result;
+    
     //add flags
     up->dmx512rx_status.flags = flags;
 
@@ -370,8 +590,8 @@ static void dmx512_rx_handle_done(struct uart_nuc970_port *up, unsigned int flag
             up->dmx512rx_status.flags |= DMX512_RX_STATUS_CACHE;
         }
     }
-    
-    //disenable interupt
+
+    //disable interupt
     serial_out(up, UART_REG_IER, serial_in(up, UART_REG_IER) & (~(RTO_IEN | RDA_IEN | TIME_OUT_EN)));
 
     //flush fifo
@@ -379,6 +599,46 @@ static void dmx512_rx_handle_done(struct uart_nuc970_port *up, unsigned int flag
 
     //Clear pending interrupts (not every bit are write 1 clear though...)
     serial_out(up, UART_REG_ISR, 0xFFFFFFFF);
+
+    //calculate frame freq
+    if(up->dmx512rx_status.rx_timer.diff_time != 0)
+    {
+        //fix last frame
+        if(flags & DMX512_RX_STATUS_BREAK)
+        {
+            if((up->dmx512rx.wr_pos < DMX512_DATA_LEN) && (up->dmx512rx.wr_pos > 0))
+            {
+                if(up->dmx512rx.cur_idx > 0)
+                {
+                    if(up->dmx512rx_status.rx_timer.total_diff.tv_usec < up->dmx512rx_status.rx_timer.diff_time)
+                    {
+                        if(up->dmx512rx_status.rx_timer.total_diff.tv_sec > 0)
+                        {
+                            up->dmx512rx_status.rx_timer.total_diff.tv_sec--;
+                            up->dmx512rx_status.rx_timer.total_diff.tv_usec += 1000000;
+                            up->dmx512rx_status.rx_timer.total_diff.tv_usec -= up->dmx512rx_status.rx_timer.diff_time;
+                        }
+                    }
+                    else
+                    {
+                        up->dmx512rx_status.rx_timer.total_diff.tv_usec -= up->dmx512rx_status.rx_timer.diff_time;
+                    }
+                }
+            }
+        }
+        
+        cal_m = up->dmx512rx_status.cur_frame;
+        cal_m = cal_m * 1000 * 1000 * 10000;
+        cal_d = up->dmx512rx_status.rx_timer.total_diff.tv_sec;
+        cal_d = cal_d * 1000 * 1000 + up->dmx512rx_status.rx_timer.total_diff.tv_usec;
+        cal_mod = do_div(cal_m, cal_d);
+        result = cal_m;
+        up->dmx512rx_status.frame_freq = (result / 10) + ((result % 10) + 5) / 10;
+    }
+    else
+    {
+        up->dmx512rx_status.frame_freq = 0;
+    }
 
     //send wakeup event
     atomic_set(&up->rx_condition, 1);
@@ -409,6 +669,9 @@ dmx512_rx_chars(struct uart_nuc970_port *up)
                     ch = (unsigned char)serial_in(up, UART_REG_RBR);
                     ch = (unsigned char)serial_in(up, UART_REG_RBR);
                     max_count -= 2;
+
+                    //rx timer handle
+                    dmx512_rx_timer_handle(up);
                 }
                 
         		ch = (unsigned char)serial_in(up, UART_REG_RBR);
@@ -445,6 +708,9 @@ dmx512_rx_chars(struct uart_nuc970_port *up)
                     ch = (unsigned char)serial_in(up, UART_REG_RBR);
                     ch = (unsigned char)serial_in(up, UART_REG_RBR);
                     max_count -= 2;
+
+                    //rx timer handle
+                    dmx512_rx_timer_handle(up);
                 }
                 
         		ch = (unsigned char)serial_in(up, UART_REG_RBR);
@@ -509,6 +775,27 @@ dmx512_rx_chars(struct uart_nuc970_port *up)
                     up->rs485.flags &= (~SER_RS485_DMX512_PAUSE);
                     return;
                 }
+                else if(up->rs485.flags & SER_RS485_DMX512_PAUSE)
+                {
+                    //fix first frame
+                    if(up->dmx512rx.cur_idx > 0)
+                    {
+                        if(up->dmx512rx_status.rx_timer.total_diff.tv_usec < up->dmx512rx_status.rx_timer.diff_time)
+                        {
+                            if(up->dmx512rx_status.rx_timer.total_diff.tv_sec > 0)
+                            {
+                                up->dmx512rx_status.rx_timer.total_diff.tv_sec--;
+                                up->dmx512rx_status.rx_timer.total_diff.tv_usec += 1000000;
+                                up->dmx512rx_status.rx_timer.total_diff.tv_usec -= up->dmx512rx_status.rx_timer.diff_time;
+                            }
+                        }
+                        else
+                        {
+                            up->dmx512rx_status.rx_timer.total_diff.tv_usec -= up->dmx512rx_status.rx_timer.diff_time;
+                        }
+                    }
+                    return;
+                }
                 else
                 {
                     return;
@@ -551,6 +838,27 @@ dmx512_rx_chars(struct uart_nuc970_port *up)
 
                     up->rs485.flags &= (~SER_RS485_DMX512_PAUSE);
                     
+                    return;
+                }
+                else if(up->rs485.flags & SER_RS485_DMX512_PAUSE)
+                {
+                    //fix first frame
+                    if(up->dmx512rx.cur_idx > 0)
+                    {
+                        if(up->dmx512rx_status.rx_timer.total_diff.tv_usec < up->dmx512rx_status.rx_timer.diff_time)
+                        {
+                            if(up->dmx512rx_status.rx_timer.total_diff.tv_sec > 0)
+                            {
+                                up->dmx512rx_status.rx_timer.total_diff.tv_sec--;
+                                up->dmx512rx_status.rx_timer.total_diff.tv_usec += 1000000;
+                                up->dmx512rx_status.rx_timer.total_diff.tv_usec -= up->dmx512rx_status.rx_timer.diff_time;
+                            }
+                        }
+                        else
+                        {
+                            up->dmx512rx_status.rx_timer.total_diff.tv_usec -= up->dmx512rx_status.rx_timer.diff_time;
+                        }
+                    }
                     return;
                 }
                 else
@@ -1111,6 +1419,7 @@ void nuc970serial_config_rs485(struct uart_port *port, struct serial_rs485 *rs48
 void nuc970serial_config_rs485_dmx512tx(struct uart_port *port, struct serial_rs485 *rs485conf)
 {
 	struct uart_nuc970_port *p = to_nuc970_uart_port(port);
+    unsigned int reg_val;
 
 	spin_lock(&port->lock);
 
@@ -1144,6 +1453,17 @@ void nuc970serial_config_rs485_dmx512tx(struct uart_port *port, struct serial_rs
     //set force parity check to "1",for nine bit detect
     serial_out(p, UART_REG_LCR, serial_in(p, UART_REG_LCR) &~ (EPE | NSB | BCB));
     serial_out(p, UART_REG_LCR, serial_in(p, UART_REG_LCR) | PBE | SPE);
+
+    //check between_time, set tor
+    if((p->rs485.tx_config.mode == SET_WITH_SEQ) || (p->rs485.tx_config.mode == SET_WITH_SEQ_AND_PERIOD))
+    {
+        reg_val = serial_in(p, UART_REG_TOR) &~ (0xFF << 8);
+
+        //between_time = x(us)/(1/250000) = x/4
+        reg_val |= ((p->rs485.tx_config.time_seq.between_time / 4) << 8);
+        
+        serial_out(p, UART_REG_TOR, reg_val);
+    }
 
 	spin_unlock(&port->lock);
 }
@@ -1237,8 +1557,9 @@ nuc970serial_rs485_mmap(struct uart_port *port, struct vm_area_struct * vma)
     return remap_pfn_range(vma, start, (virt_to_phys(p->pmmapbuf) >> PAGE_SHIFT), size, PAGE_SHARED);
 }
 
-static void generate_mark_for_dmx512tx(unsigned int port_line)
+static void generate_mark_for_dmx512tx(struct uart_nuc970_port *p)
 {
+    unsigned int port_line = p->port.line;
     unsigned int regRec;
     volatile unsigned int *reg;
     
@@ -1252,16 +1573,16 @@ static void generate_mark_for_dmx512tx(unsigned int port_line)
     __raw_writel(__raw_readl(reg) | tx_pos_out[port_line], reg);
     
     //generate mark time between packets
-    //msleep(1);
+    dmx512_tx_timer_handle(p);
     
     //generate break info
     reg = tx_reg_out[port_line];
     __raw_writel(__raw_readl(reg) & (~tx_pos_out[port_line]), reg);
-    udelay(180);
+    udelay(p->dmx512tx_status.cur_time_seq.break_time);
     __raw_writel(__raw_readl(reg) | tx_pos_out[port_line], reg);
     
     //generate mark after break info
-    udelay(30);
+    udelay(p->dmx512tx_status.cur_time_seq.mab_time);
     
     //release gpio,restore for uart
     reg = tx_reg_func[port_line];
@@ -1274,8 +1595,10 @@ nuc970serial_rs485_ioctl(struct uart_port *port, unsigned int cmd, unsigned long
     struct uart_nuc970_port *p = to_nuc970_uart_port(port);
 	struct serial_rs485 rs485conf;
     struct dmx512_rx_status rx_status;
+    struct dmx512_tx_status tx_status;
     struct page *page;
     unsigned long isr_flags;
+    unsigned long total_time_seq;
     int ret = 0;
 
 	switch (cmd) {
@@ -1307,6 +1630,34 @@ nuc970serial_rs485_ioctl(struct uart_port *port, unsigned int cmd, unsigned long
         //malloc space for send or receive
         if(p->rs485.flags & SER_RS485_DMX512_TX)
         {
+            //check mode set corrent
+            if(p->rs485.tx_config.mode == SET_WITH_SEQ)
+            {
+                if(p->rs485.tx_config.time_seq.between_time / 4 > 255)
+                {
+                    printk("dmx512 tx error: between_time set too long!\n");
+                    return -EFAULT;
+                }
+            }
+            
+            if(p->rs485.tx_config.mode == SET_WITH_SEQ_AND_PERIOD)
+            {
+                if(p->rs485.tx_config.time_seq.between_time / 4 > 255)
+                {
+                    printk("dmx512 tx error: between_time set too long!\n");
+                    return -EFAULT;
+                }
+
+                total_time_seq = p->rs485.tx_config.time_seq.break_time;
+                total_time_seq += p->rs485.tx_config.time_seq.mab_time;
+                total_time_seq += (11 * 4 + p->rs485.tx_config.time_seq.between_time) * 512 + 11 * 4;//data had 11bits
+                if(total_time_seq > p->rs485.tx_config.time_seq.period)
+                {
+                    printk("dmx512 tx error: time seq is more than period!\n");
+                    return -EFAULT;
+                }
+            }
+            
             //align size
             p->malloc_size = PAGE_ALIGN(DMX512_DATA_LEN);
             
@@ -1331,14 +1682,45 @@ nuc970serial_rs485_ioctl(struct uart_port *port, unsigned int cmd, unsigned long
             //clear buf
             memset(p->palloctxbuf, 0, p->malloc_size);
 
-            //config registers
-            nuc970serial_config_rs485_dmx512tx(port, &rs485conf);
-
             //init dmx512_tx            
             p->dmx512tx.p_start = 0;
             p->dmx512tx.p_end = 0;
             p->dmx512tx.p_data = (struct dmx512_data *)p->palloctxbuf;
             p->pmmapbuf = p->palloctxbuf;
+
+            //init status
+            memset((char *)&p->dmx512tx_status, 0, sizeof(struct dmx512_tx_status));
+            p->dmx512tx_status.tx_timer.min_diff = 0xFFFFFFFF;
+
+            //copy time sequence and mode
+            p->dmx512tx_status.cur_mode = p->rs485.tx_config.mode;
+            switch(p->rs485.tx_config.mode)
+            {
+                case SET_WITH_SEQ:
+                case SET_WITH_SEQ_AND_PERIOD:
+                    p->dmx512tx_status.cur_time_seq = p->rs485.tx_config.time_seq;
+                    break;
+                case SET_WITH_FREQ:
+                default:
+                    p->dmx512tx_status.cur_time_seq.mtbp_time = DEFAULT_MTBP_TIME;
+                    p->dmx512tx_status.cur_time_seq.mab_time = DEFAULT_MAB_TIME;
+                    p->dmx512tx_status.cur_time_seq.break_time = DEFAULT_BREAK_TIME;
+                    p->dmx512tx_status.cur_time_seq.between_time = DEFAULT_BETWEEN_TIME;
+                    p->dmx512tx_status.cur_time_seq.freq = p->rs485.tx_config.time_seq.freq;
+                    if(p->dmx512tx_status.cur_time_seq.freq > 0)
+                    {
+                        p->dmx512tx_status.cur_time_seq.period = 1000 * 1000 * 1000 / p->dmx512tx_status.cur_time_seq.freq;
+                    }
+                    else
+                    {
+                        p->dmx512tx_status.cur_time_seq.period = 0;
+                    }
+                    break;
+                    
+            }
+
+            //config registers
+            nuc970serial_config_rs485_dmx512tx(port, &rs485conf);
         }
         else if(p->rs485.flags & SER_RS485_DMX512_RX)
         {
@@ -1397,8 +1779,8 @@ nuc970serial_rs485_ioctl(struct uart_port *port, unsigned int cmd, unsigned long
             p->rs485.flags &= (~SER_RS485_DMX512_PAUSE);
 
             //init status
-            p->dmx512rx_status.cur_frame = 0;
-            p->dmx512rx_status.flags = 0;
+            memset((char *)&p->dmx512rx_status, 0, sizeof(struct dmx512_rx_status));
+            p->dmx512rx_status.rx_timer.min_diff = 0xFFFFFFFF;
 
             //config registers
             nuc970serial_config_rs485_dmx512rx(port, &rs485conf);
@@ -1427,7 +1809,7 @@ nuc970serial_rs485_ioctl(struct uart_port *port, unsigned int cmd, unsigned long
         serial_out(p, UART_REG_FCR, serial_in(p, UART_REG_FCR) | TFR);
 
         //gen mark
-        generate_mark_for_dmx512tx(p->port.line);
+        generate_mark_for_dmx512tx(p);
 
         //send empty
         serial_out(p, UART_REG_THR, 0);
@@ -1441,6 +1823,8 @@ nuc970serial_rs485_ioctl(struct uart_port *port, unsigned int cmd, unsigned long
         }
 
         atomic_set(&p->tx_condition, 0);
+
+        ret = p->dmx512tx_status.cur_frame_freq;
 
         //mutex unlock
         mutex_unlock(&p->dmx512tx.mutex_lock);
@@ -1470,8 +1854,7 @@ nuc970serial_rs485_ioctl(struct uart_port *port, unsigned int cmd, unsigned long
         //copy status
         spin_lock_irqsave(&p->dmx512rx.spin_lock, isr_flags);
         p->dmx512rx_status.cur_frame = p->dmx512rx.cur_idx;
-        rx_status.cur_frame = p->dmx512rx_status.cur_frame;
-        rx_status.flags = p->dmx512rx_status.flags;
+        memcpy((char *)&rx_status, (char *)&p->dmx512rx_status, sizeof(struct dmx512_rx_status));
         p->dmx512rx_status.flags &= DMX512_RX_STATUS_CACHE;
         spin_unlock_irqrestore(&p->dmx512rx.spin_lock, isr_flags);
 
@@ -1488,7 +1871,7 @@ nuc970serial_rs485_ioctl(struct uart_port *port, unsigned int cmd, unsigned long
         dmx512_rx_handle_done(p, rx_status.flags);
 
         //if last frame not enough, skip it
-        if(p->dmx512rx.wr_pos < DMX512_DATA_LEN)
+        if((p->dmx512rx.wr_pos < DMX512_DATA_LEN) && (p->dmx512rx.wr_pos > 0))
         {
             p->dmx512rx.wr_pos = 0;
             if(p->dmx512rx.cur_idx > 0)
@@ -1497,8 +1880,7 @@ nuc970serial_rs485_ioctl(struct uart_port *port, unsigned int cmd, unsigned long
 
         //copy status
         p->dmx512rx_status.cur_frame = p->dmx512rx.cur_idx;
-        rx_status.cur_frame = p->dmx512rx_status.cur_frame;
-        rx_status.flags = p->dmx512rx_status.flags;
+        memcpy((char *)&rx_status, (char *)&p->dmx512rx_status, sizeof(struct dmx512_rx_status));
         
         if (copy_to_user((struct dmx512_rx_status*) arg,
 					&rx_status,
@@ -1516,6 +1898,24 @@ nuc970serial_rs485_ioctl(struct uart_port *port, unsigned int cmd, unsigned long
         if(p->dmx512rx.wr_pos > 0)
         {
             p->dmx512rx.wr_pos = 0;
+
+            //fix last frame
+            if(p->dmx512rx.cur_idx > 0)
+            {
+                if(p->dmx512rx_status.rx_timer.total_diff.tv_usec < p->dmx512rx_status.rx_timer.diff_time)
+                {
+                    if(p->dmx512rx_status.rx_timer.total_diff.tv_sec > 0)
+                    {
+                        p->dmx512rx_status.rx_timer.total_diff.tv_sec--;
+                        p->dmx512rx_status.rx_timer.total_diff.tv_usec += 1000000;
+                        p->dmx512rx_status.rx_timer.total_diff.tv_usec -= p->dmx512rx_status.rx_timer.diff_time;
+                    }
+                }
+                else
+                {
+                    p->dmx512rx_status.rx_timer.total_diff.tv_usec -= p->dmx512rx_status.rx_timer.diff_time;
+                }
+            }
         }
         printk("paused!\n");
         break;
@@ -1529,13 +1929,23 @@ nuc970serial_rs485_ioctl(struct uart_port *port, unsigned int cmd, unsigned long
     case TIOCDMX512RXSTATUS:
         spin_lock_irqsave(&p->dmx512rx.spin_lock, isr_flags);
         p->dmx512rx_status.cur_frame = p->dmx512rx.cur_idx;
-        rx_status.cur_frame = p->dmx512rx_status.cur_frame;
-        rx_status.flags = p->dmx512rx_status.flags;
+        memcpy((char *)&rx_status, (char *)&p->dmx512rx_status, sizeof(struct dmx512_rx_status));
         spin_unlock_irqrestore(&p->dmx512rx.spin_lock, isr_flags);
         
         if (copy_to_user((struct dmx512_rx_status*) arg,
 					&rx_status,
 					sizeof(struct dmx512_rx_status)))
+			return -EFAULT;
+        break;
+        
+    case TIOCDMX512TXSTATUS:
+        spin_lock_irqsave(&p->dmx512tx.spin_lock, isr_flags);
+        memcpy((char *)&tx_status, (char *)&p->dmx512tx_status, sizeof(struct dmx512_tx_status));
+        spin_unlock_irqrestore(&p->dmx512tx.spin_lock, isr_flags);
+        
+        if (copy_to_user((struct dmx512_tx_status*) arg,
+					&tx_status,
+					sizeof(struct dmx512_tx_status)))
 			return -EFAULT;
         break;
         
@@ -2053,7 +2463,10 @@ static int nuc970serial_probe(struct platform_device *pdev)
         up->pallocrxbuf2 = 0;
         memset((char *)&up->dmx512tx, 0, sizeof(struct dmx512_tx));
         memset((char *)&up->dmx512rx, 0, sizeof(struct dmx512_rx));
+        memset((char *)&up->dmx512tx_status, 0, sizeof(struct dmx512_tx_status));
+        up->dmx512tx_status.tx_timer.min_diff = 0xFFFFFFFF;
         memset((char *)&up->dmx512rx_status, 0, sizeof(struct dmx512_rx_status));
+        up->dmx512rx_status.rx_timer.min_diff = 0xFFFFFFFF;
 
         //init tx wait q
         init_waitqueue_head(&up->tx_queue);

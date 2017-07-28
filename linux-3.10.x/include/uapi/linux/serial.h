@@ -101,11 +101,40 @@ struct serial_icounter_struct {
 	int reserved[9];
 };
 
-struct dmx512_config_tx {
+/*
+ * use method:
+ * set frame freq, auto fix it
+ * set seq(mtbp_time, mab_time, break_time, between_time), manual fix it
+ * set seq and period, auto fix mtbp_time, this mode use to fix dmx512 device which is not support too short seq
+ */
+typedef enum _dmx512_time_seq_mode
+{
+    SET_WITH_FREQ = 0,
+    SET_WITH_SEQ,
+    SET_WITH_SEQ_AND_PERIOD
+}dmx512_time_seq_mode;
+
+/*
+ * mtbp_time is frame gap, mab_time is first low V width, break_time is first High V to num. 0 data,
+ * between_time is data gap, period = mtbp_time + break_time + mab_time + (1 / data_rate * 11 + between_time) * 513
+ * freq is 1/period, freq is multiply by 1000
+ */
+struct dmx512_time_seq {
+#define DEFAULT_MTBP_TIME       0
+#define DEFAULT_BREAK_TIME      180
+#define DEFAULT_MAB_TIME        30
+#define DEFAULT_BETWEEN_TIME    0
     unsigned int mtbp_time;
-    unsigned int mab_time;
     unsigned int break_time;
+    unsigned int mab_time;
     unsigned int between_time;
+    unsigned long period;
+    unsigned long freq;
+};
+
+struct dmx512_config_tx {
+    struct dmx512_time_seq time_seq;
+    dmx512_time_seq_mode mode;
 };
 
 struct dmx512_config_rx {

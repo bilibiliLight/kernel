@@ -70,8 +70,18 @@ struct dmx512_rx {
     int total_num;
 };
 
+struct dmx512_timer {
+    struct timeval last_tv;
+    struct timeval total_diff;
+    unsigned long diff_time;
+    unsigned long max_diff;
+    unsigned long min_diff;
+};
+
 struct dmx512_rx_status {
     unsigned int cur_frame;
+    unsigned long frame_freq;
+    struct dmx512_timer rx_timer;
 
 #define DMX512_RX_STATUS_DONE     (1<<0)
 #define DMX512_RX_STATUS_BREAK    (1<<1)
@@ -81,6 +91,12 @@ struct dmx512_rx_status {
     unsigned int flags;
 };
 
+struct dmx512_tx_status {
+    struct dmx512_time_seq cur_time_seq;
+    dmx512_time_seq_mode cur_mode;
+    unsigned long cur_frame_freq;
+    struct dmx512_timer tx_timer;
+};
 
 struct uart_nuc970_port {
 	struct uart_port	port;
@@ -95,6 +111,7 @@ struct uart_nuc970_port {
 	struct serial_rs485     rs485;          /* rs485 settings */
     struct dmx512_tx    dmx512tx;     /* dmx512 send data */
     struct dmx512_rx    dmx512rx;     /* dmx512 receive data */
+    struct dmx512_tx_status dmx512tx_status; /* status of dmx512 tx */
     struct dmx512_rx_status dmx512rx_status; /* status of dmx512 rx */
     char                *pmmapbuf;    /* mmap to user buf */
     char                *palloctxbuf;       /* alloc for dmx512 send */
