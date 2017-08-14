@@ -66,6 +66,8 @@
 #define TIOCBIT9ADDR            0x546A
 #define TIOCBIT9DATA            0x546B
 
+#define HRTIMER_TIMEOUT_SOFTLIMIT    3
+
 static struct uart_driver nuc970serial_reg;
 
 struct clk		*clk;
@@ -136,6 +138,8 @@ struct uart_nuc970_port {
     struct dmx512_rx    dmx512rx;     /* dmx512 receive data */
     struct dmx512_tx_status dmx512tx_status; /* status of dmx512 tx */
     struct dmx512_rx_status dmx512rx_status; /* status of dmx512 rx */
+    ktime_t softlimit;  /* timer for hrtimer */
+    struct hrtimer timer;   /* dmx512 tx hrtimer */
     char                *pmmapbuf;    /* mmap to user buf */
     char                *palloctxbuf;       /* alloc for dmx512 send */
     char                *pallocrxbuf1;      /* alloc for dmx512 receive */
@@ -162,6 +166,30 @@ unsigned int             tx_pos_out[11] = {      0x01<<(1*0),       0x01<<(1*2),
 
 struct uart_nuc970_port nuc970serial_ports[UART_NR];
 EXPORT_SYMBOL(nuc970serial_ports);
+
+static enum hrtimer_restart hrtimer_callback_nolock(struct hrtimer *timer)
+{
+	struct uart_nuc970_port *up = container_of(timer, struct uart_nuc970_port, timer);
+    
+	atomic_set(&up->tx_condition, 1);
+    wake_up_interruptible(&up->tx_queue);
+    
+	return HRTIMER_NORESTART;
+}
+
+static int hrtimer_delay(struct uart_nuc970_port *p, unsigned long us)
+{
+    p->softlimit = ktime_set(us / 1000000, (us % 1000000) * 1000);
+    hrtimer_start(&p->timer, p->softlimit, HRTIMER_MODE_REL);
+    if(atomic_read(&p->tx_condition) == 0)
+    {
+        wait_event_interruptible_timeout(p->tx_queue, atomic_read(&p->tx_condition), 1*HZ);
+    }
+
+    atomic_set(&p->tx_condition, 0);
+
+    return 0;
+}
 
 static inline struct uart_nuc970_port *
 to_nuc970_uart_port(struct uart_port *uart)
@@ -484,7 +512,7 @@ static void dmx512_tx_timer_handle(struct uart_nuc970_port *up)
     switch(up->dmx512tx_status.cur_mode)
     {
         case SET_WITH_SEQ:
-            udelay(up->dmx512tx_status.cur_time_seq.mtbp_time);
+            hrtimer_delay(up, up->dmx512tx_status.cur_time_seq.mtbp_time);
             break;
         default:
             break;
@@ -520,7 +548,7 @@ static void dmx512_tx_timer_handle(struct uart_nuc970_port *up)
                     if(up->dmx512tx_status.tx_timer.diff_time < up->dmx512tx_status.cur_time_seq.period)
                     {
                         up->dmx512tx_status.cur_time_seq.mtbp_time = up->dmx512tx_status.cur_time_seq.period - up->dmx512tx_status.tx_timer.diff_time;
-                        udelay(up->dmx512tx_status.cur_time_seq.mtbp_time);
+                        hrtimer_delay(up, up->dmx512tx_status.cur_time_seq.mtbp_time);
 
                         do_gettimeofday(&cur_tv);
 
@@ -1578,11 +1606,11 @@ static void generate_mark_for_dmx512tx(struct uart_nuc970_port *p)
     //generate break info
     reg = tx_reg_out[port_line];
     __raw_writel(__raw_readl(reg) & (~tx_pos_out[port_line]), reg);
-    udelay(p->dmx512tx_status.cur_time_seq.break_time);
+    hrtimer_delay(p, p->dmx512tx_status.cur_time_seq.break_time);
     __raw_writel(__raw_readl(reg) | tx_pos_out[port_line], reg);
     
     //generate mark after break info
-    udelay(p->dmx512tx_status.cur_time_seq.mab_time);
+    hrtimer_delay(p, p->dmx512tx_status.cur_time_seq.mab_time);
     
     //release gpio,restore for uart
     reg = tx_reg_func[port_line];
@@ -1721,6 +1749,11 @@ nuc970serial_rs485_ioctl(struct uart_port *port, unsigned int cmd, unsigned long
 
             //config registers
             nuc970serial_config_rs485_dmx512tx(port, &rs485conf);
+
+            //init hrtimer
+            hrtimer_init(&p->timer, CLOCK_BOOTTIME, HRTIMER_MODE_REL);
+        	p->timer.function = hrtimer_callback_nolock;
+            p->softlimit = ktime_set(HRTIMER_TIMEOUT_SOFTLIMIT, 0);
         }
         else if(p->rs485.flags & SER_RS485_DMX512_RX)
         {

@@ -113,6 +113,8 @@ struct uart_nuc970_port {
     struct dmx512_rx    dmx512rx;     /* dmx512 receive data */
     struct dmx512_tx_status dmx512tx_status; /* status of dmx512 tx */
     struct dmx512_rx_status dmx512rx_status; /* status of dmx512 rx */
+    ktime_t softlimit;  /* timer for hrtimer */
+    struct hrtimer timer;   /* dmx512 tx hrtimer */
     char                *pmmapbuf;    /* mmap to user buf */
     char                *palloctxbuf;       /* alloc for dmx512 send */
     char                *pallocrxbuf1;      /* alloc for dmx512 receive */
