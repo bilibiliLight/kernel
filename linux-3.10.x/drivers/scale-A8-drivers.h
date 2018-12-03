@@ -41,6 +41,9 @@ typedef struct gpio_cfg
 #define SCALE_GPIO_IOC_DETECT_INIT      _IOW(SCALE_MAGIC, 0xb2, unsigned long)
 #define SCALE_GPIO_IOC_DETECT_REINIT    _IOW(SCALE_MAGIC, 0xb3, unsigned long)
 
+//FOR set PD12 from PWM to GPIO 
+#define SCALE_GPIO_PD12_INIT      		_IOW(SCALE_MAGIC, 0xb4, unsigned long)
+
 #define SCALE_IOC_MAXNR 0xF0
 
 /* Convert GPIO signal to GPIO pin number */

@@ -371,6 +371,16 @@ static long gpio_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
         reg = REG_GPIOH_ISR;
         __raw_writel(__raw_readl(reg) | (0x01<<(1*5)), reg);
         return retval;
+     case SCALE_GPIO_PD12_INIT:
+        printk("Set PD12 from PWM to GPIO\n");
+        //set PD12 as GPIO
+        reg = REG_MFP_GPD_H;
+        __raw_writel(__raw_readl(reg) & 0xFFF0FFFF, reg);
+        
+        //set PD12 OUTPUT
+        reg = REG_GPIOD_DIR;
+        __raw_writel(__raw_readl(reg) | (1<<12), reg);
+        break;
     default:
         break;
     }
